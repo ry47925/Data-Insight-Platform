@@ -81,7 +81,14 @@ Write-Host "[OK] Required ports are free." -ForegroundColor Green
 function New-RandomPassword([int]$len = 16) {
     $chars = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
     $bytes = New-Object byte[] $len
-    [System.Security.Cryptography.RandomNumberGenerator]::Fill($bytes)
+    # 兼容 .NET Framework(PS5.1) / .NET Core(PS7)：Create()+GetBytes() 两版本均支持
+    $rng = [System.Security.Cryptography.RandomNumberGenerator]::Create()
+    try {
+        $rng.GetBytes($bytes)
+    }
+    finally {
+        $rng.Dispose()
+    }
     $sb = New-Object System.Text.StringBuilder
     for ($i = 0; $i -lt $len; $i++) {
         [void]$sb.Append($chars[$bytes[$i] % $chars.Length])

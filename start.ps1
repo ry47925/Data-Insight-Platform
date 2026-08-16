@@ -279,6 +279,33 @@ else {
 }
 
 # ------------------------------------------------------------
+# 5.1 Wait for frontend readiness（首次需在容器内 npm install，可能较久）
+# ------------------------------------------------------------
+if ($Mode -eq "dev") { $frontUrls = @("http://localhost:5173", "http://localhost:5174/admin.html") }
+else { $frontUrls = @("http://localhost", "http://localhost/admin.html") }
+Write-Host ""
+Write-Host "[INFO] Waiting for frontend to be ready (first run installs npm dependencies, may take several minutes)..." -ForegroundColor Yellow
+foreach ($u in $frontUrls) {
+    $fReady = $false
+    for ($i = 0; $i -lt 200; $i++) {   # 200 * 3s ≈ 10 min
+        try {
+            $res = Invoke-WebRequest -Uri $u -UseBasicParsing -TimeoutSec 3
+            if ($res.StatusCode -eq 200) { $fReady = $true; break }
+        }
+        catch {
+            # frontend not up yet, keep waiting
+        }
+        Start-Sleep -Seconds 3
+    }
+    if ($fReady) {
+        Write-Host "[OK] $u is ready." -ForegroundColor Green
+    }
+    else {
+        Write-Host "[WARN] $u not ready within 10min. Check logs: $compose logs frontend" -ForegroundColor Yellow
+    }
+}
+
+# ------------------------------------------------------------
 # 6. Print access URLs
 # ------------------------------------------------------------
 Write-Host ""

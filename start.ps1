@@ -135,6 +135,14 @@ $backendEnv = Join-Path $root "backend\.env"
 $backendEnvExample = Join-Path $root "backend\.env.example"
 if ((Test-Path $backendEnv) -and -not $Force) {
     Write-Host "[INFO] backend/.env exists, keeping it."
+    # 已有配置时也展示 admin 账号，避免重跑后看不到密码
+    $envContent = Get-Content -Path $backendEnv -Raw
+    $adminUser = ""; $adminPass = ""
+    if ($envContent -match '(?m)^ADMIN_USERNAME=(.*)$') { $adminUser = $matches[1].Trim() }
+    if ($envContent -match '(?m)^ADMIN_PASSWORD=(.*)$') { $adminPass = $matches[1].Trim() }
+    if ($adminUser -and $adminPass) {
+        Write-Host "[ADMIN] username: $adminUser  password: $adminPass" -ForegroundColor Yellow
+    }
 }
 else {
     if (-not (Test-Path $backendEnvExample)) {

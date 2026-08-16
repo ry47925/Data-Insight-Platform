@@ -46,10 +46,6 @@
         :total="previewTotal"
         :empty-text="previewEmptyText"
       />
-      <div v-if="mlRawData.length === 0" class="empty-hint" style="margin-top:10px;color:var(--text-muted);">
-        <el-icon><UploadFilled /></el-icon>
-        <span>暂无原始数据，请先上传文件</span>
-      </div>
     </div>
 
     <!-- ========== 预检结果展示(位于任务配置上方,先预检再配置) ========== -->

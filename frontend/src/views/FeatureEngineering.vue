@@ -49,11 +49,6 @@
         :total="dsPreviewTotal"
         :empty-text="dsPreviewEmptyText"
       />
-      <!-- 无可用数据的空状态提示 -->
-      <div v-if="availableDatasets.length === 0 && !datasetsLoading" class="empty-hint" style="margin-top:10px;color:var(--text-muted);">
-        <el-icon><UploadFilled /></el-icon>
-        <span>暂无可用数据，请先上传文件</span>
-      </div>
     </div>
 
     <!-- ========== 列池管理 ========== -->

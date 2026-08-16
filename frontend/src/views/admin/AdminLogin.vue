@@ -20,9 +20,6 @@
             登录
           </el-button>
         </el-form-item>
-        <div class="login-tips">
-          <span class="tip-text">默认账号：admin / admin123</span>
-        </div>
       </el-form>
     </div>
   </div>
@@ -124,15 +121,5 @@ async function handleLogin() {
   font-size: 16px;
   font-weight: 600;
   border-radius: 10px;
-}
-
-.login-tips {
-  text-align: center;
-  margin-top: 20px;
-}
-
-.tip-text {
-  font-size: 12px;
-  color: #9ca3af;
 }
 </style>

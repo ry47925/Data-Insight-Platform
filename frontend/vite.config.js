@@ -4,8 +4,8 @@ import { resolve } from 'path'
 
 export default defineConfig(({ command }) => ({
   plugins: [vue()],
-  // 开发模式 base 用根路径(/)避免资源 404 白屏；生产构建用 /static/ 适配后端 nginx 挂载
-  base: command === 'build' ? '/static/' : '/',
+  // 资源路径：Docker 独立部署用 VITE_BASE 覆盖为 /；默认生产构建用 /static/ 适配后端 nginx 挂载
+  base: process.env.VITE_BASE || (command === 'build' ? '/static/' : '/'),
   resolve: {
     alias: {
       '@': resolve(__dirname, 'src')

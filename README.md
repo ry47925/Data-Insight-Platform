@@ -17,38 +17,60 @@
 ```
 backend/        # FastAPI 后端（app/api 路由、services 业务层、utils 工具）
 frontend/       # Vue3 前端（src/ 源码，dev 端口 5173；admin 5174）
-docker-compose.example.yml  # 编排模板（复制为 docker-compose.yml 并填写密码后使用）
+docker-compose.example.yml  # 编排模板（复制为 docker-compose.yml，dev/prod 双模式）
 init.sql        # PostgreSQL 初始化脚本
-dev.ps1         # 本地开发一键启动脚本（Windows）
+start.ps1       # Windows 一键启动脚本（检查环境+生成配置+启动）
+dev.ps1         # 本地开发启动脚本（不使用 Docker 时的备选方案）
 watch-celery.ps1    # Celery + Backend 容器热重载监听（改 .py 自动重启容器）
 ```
 
-> `docker-compose.yml` 含本地密码配置，已被 `.gitignore` 排除，需自行从模板复制生成。
+> `docker-compose.yml`、根目录 `.env`、`backend/.env` 含本地配置，已被 `.gitignore` 排除，由 `start.ps1` 自动从模板生成。
 
-## 快速开始（Docker）
+## 快速开始（Docker，一键）
 
-1. 克隆仓库并进入目录。
-2. 生成 compose 配置（模板中的密码均为本地开发默认值，生产环境请修改）：
-
-```powershell
-copy docker-compose.example.yml docker-compose.yml
-# 可选：在项目根目录创建 .env 覆盖默认密码/密钥（POSTGRES_PASSWORD、REDIS_PASSWORD、MINIO_ACCESS_KEY 等）
-```
-
-3. 配置后端环境变量（复制模板）：
+**Windows**（需安装 Docker Desktop）：
 
 ```powershell
-cd backend
-copy .env.example .env
-# 编辑 .env：填写 DATABASE_URL、SECRET_KEY、OPENAI_API_KEY（如需 AI 分析）、各中间件连接信息
+.\start.ps1
 ```
 
-4. 启动全部服务：
+脚本会自动完成：检查 Docker 环境与端口 → 从模板生成 `docker-compose.yml`、根 `.env`、`backend/.env`（自动生成随机密码/密钥，已有配置不覆盖）→ 以**开发模式**启动全部服务（后端热重载 + 前端 Vite HMR）→ 等待就绪并输出访问地址。
+
+其他模式：
 
 ```powershell
-cd ..
-docker-compose up -d --build
+.\start.ps1 -Mode prod   # 生产模式（构建镜像，nginx + 多 worker）
+.\start.ps1 -Force       # 强制重新生成配置文件
 ```
+
+**Linux / Mac**（手动，等价于脚本逻辑）：
+
+```bash
+cp docker-compose.example.yml docker-compose.yml
+cd backend && cp .env.example .env && cd ..
+docker compose --profile dev up -d --build    # 开发模式
+# docker compose --profile prod up -d --build  # 生产模式
+```
+
+### 访问地址
+
+| 模式 | 用户端 | 管理后台 | API 文档 |
+| --- | --- | --- | --- |
+| 开发（dev） | http://localhost:5173 | http://localhost:5174/admin.html | http://localhost:8000/docs |
+| 生产（prod） | http://localhost | http://localhost/admin.html | http://localhost:8000/docs |
+
+> 首次启动为**全新的空系统**（不含任何示例数据）；如需 AI 分析，编辑 `backend/.env` 填入 `OPENAI_API_KEY` 后重启 backend 容器。
+
+### 停止服务
+
+```powershell
+docker compose --profile dev down      # 开发模式
+docker compose --profile prod down     # 生产模式
+```
+
+### 不使用 Docker 的本地开发
+
+按 `dev.ps1` 启动基础设施容器 + 本地 uvicorn/vite（详见下方"环境变量"与开发脚本注释）。
 
 - 用户端（nginx 80）：`http://localhost`
 - 管理后台：`http://localhost/admin.html`

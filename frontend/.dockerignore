@@ -1,0 +1,5 @@
+# 防止本地构建产物/依赖进入构建上下文
+node_modules/
+dist/
+dist-admin/
+*.log

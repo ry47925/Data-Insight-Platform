@@ -26,3 +26,4 @@ docker-data/
 .ai-context/
 backend/test_data/
 docker-compose.yml
+DOCKER_IMAGES_GUIDE.md

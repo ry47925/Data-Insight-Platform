@@ -1,0 +1,12 @@
+# 防止敏感/冗余文件进入镜像
+.env
+test_data/
+logs/
+data/
+models/
+__pycache__/
+*.pyc
+*.log
+node_modules/
+dist/
+.pytest_cache/

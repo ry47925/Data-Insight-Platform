@@ -59,7 +59,30 @@ docker compose --profile dev up -d --build    # 开发模式
 | 开发（dev） | http://localhost:5173 | http://localhost:5174/admin.html | http://localhost:8000/docs |
 | 生产（prod） | http://localhost | http://localhost/admin.html | http://localhost:8000/docs |
 
-> 首次启动为**全新的空系统**（不含任何示例数据）；如需 AI 分析，编辑 `backend/.env` 填入 `OPENAI_API_KEY` 后重启 backend 容器。
+> 首次启动为**全新的空系统**（不含任何示例数据）；如需 AI 分析，配置方法见下文「配置 AI 分析」。
+
+### 配置 AI 分析（可选）
+
+运行 `start.ps1` 时，若检测到 `OPENAI_API_KEY` 未配置，会**交互式引导配置**：输入 API Key（隐藏显示）→ 自动测试连接 → 验证通过后写入 `backend/.env`。
+
+也可手动配置：编辑 `backend/.env`，填写以下变量后重启 backend 容器：
+
+```dotenv
+OPENAI_API_KEY=sk-xxxxxxxx
+OPENAI_API_BASE=https://api.deepseek.com/v1
+OPENAI_MODEL=deepseek-chat
+```
+
+> 平台使用 **OpenAI 兼容接口**，`OPENAI_API_BASE` 可指向任意兼容服务（DeepSeek / OpenAI / 通义千问 / Kimi / 智谱 GLM 等），并同步将 `OPENAI_MODEL` 改为对应模型名。
+
+重启后端使配置生效：
+
+```powershell
+docker compose --profile dev restart backend        # 开发模式
+docker compose --profile prod restart backend-prod  # 生产模式
+```
+
+配置完成后登录平台，进入「AI 分析」模块发起对话即可验证。
 
 ### 停止服务
 

@@ -1,4 +1,4 @@
-<#
+﻿<#
 # ============================================================
 # Data Insight Platform - One-click Docker Startup
 # ============================================================
@@ -145,7 +145,90 @@ else {
     Set-Content -Path $backendEnv -Value $content -Encoding UTF8
     Write-Host "[OK] backend/.env generated from template." -ForegroundColor Green
     Write-Host "[ADMIN] username: admin  password: $adminPass  (keep it safe)" -ForegroundColor Yellow
-    Write-Host "[HINT] Edit backend/.env and set OPENAI_API_KEY to enable AI analysis." -ForegroundColor Yellow
+}
+
+# ------------------------------------------------------------
+# 3.4 配置 AI 分析（可选）：交互式输入 API Key 并测试连接
+# ------------------------------------------------------------
+function Test-AIConnection {
+    # 发送最小 chat 请求，验证 Key / 服务地址 / 模型名是否有效（消耗约 1 token）
+    param([string]$Base, [string]$Model, [string]$Key)
+    $body = @{
+        model      = $Model
+        messages   = @(@{ role = "user"; content = "ping" })
+        max_tokens = 1
+    } | ConvertTo-Json -Depth 5
+    $headers = @{ Authorization = "Bearer $Key" }
+    try {
+        $null = Invoke-RestMethod -Uri "$($Base.TrimEnd('/'))/chat/completions" -Headers $headers -Method Post -Body $body -ContentType "application/json" -TimeoutSec 20
+        return $true
+    }
+    catch {
+        Write-Host "  [FAIL] 连接失败: $($_.Exception.Message)" -ForegroundColor Yellow
+        return $false
+    }
+}
+
+function Set-EnvValue {
+    # 按行替换 .env 中某个变量的值（变量不存在则追加；$ 已转义防止正则组引用）
+    param([string]$Content, [string]$Name, [string]$Value)
+    $escaped = $Value.Replace('$', '$$')
+    if ($Content -match "(?m)^$([regex]::Escape($Name))=") {
+        return ($Content -replace "(?m)^$([regex]::Escape($Name))=.*$", "$Name=$escaped")
+    }
+    return ($Content.TrimEnd() + "`r`n$Name=$escaped")
+}
+
+Write-Host ""
+Write-Host "=== AI 分析配置（可选）===" -ForegroundColor Cyan
+$aiContent = Get-Content -Path $backendEnv -Raw
+$currentKey = ""
+if ($aiContent -match '(?m)^OPENAI_API_KEY=(.*)$') { $currentKey = $matches[1].Trim() }
+
+if ($currentKey -and $currentKey -notmatch 'your-') {
+    Write-Host "[INFO] OPENAI_API_KEY 已配置，跳过。如需更换，请手动编辑 backend/.env 后重启 backend 容器。" -ForegroundColor Green
+}
+else {
+    $answer = Read-Host "是否现在配置 AI 分析 API Key？(Y/n)"
+    if ($answer -ne 'n' -and $answer -ne 'N') {
+        $aiBase = Read-Host "AI 服务地址（默认 https://api.deepseek.com/v1）"
+        if ([string]::IsNullOrWhiteSpace($aiBase)) { $aiBase = "https://api.deepseek.com/v1" }
+        $aiModel = Read-Host "模型名（默认 deepseek-chat）"
+        if ([string]::IsNullOrWhiteSpace($aiModel)) { $aiModel = "deepseek-chat" }
+
+        $configured = $false
+        for ($attempt = 1; $attempt -le 3 -and -not $configured; $attempt++) {
+            if ($attempt -gt 1) {
+                $retry = Read-Host "是否重试输入 Key？(Y/n)"
+                if ($retry -eq 'n' -or $retry -eq 'N') { break }
+            }
+            Write-Host "请输入 API Key（输入过程不显示）：" -NoNewline
+            $secure = Read-Host -AsSecureString
+            $ptr = [System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($secure)
+            $aiKey = [System.Runtime.InteropServices.Marshal]::PtrToStringBSTR($ptr)
+            [System.Runtime.InteropServices.Marshal]::ZeroFreeBSTR($ptr)
+            if ([string]::IsNullOrWhiteSpace($aiKey)) {
+                Write-Host "[WARN] 未输入 Key，跳过配置。" -ForegroundColor Yellow
+                break
+            }
+
+            Write-Host "  正在测试连接（$aiBase / $aiModel）..."
+            if (Test-AIConnection -Base $aiBase -Model $aiModel -Key $aiKey) {
+                $aiContent = Set-EnvValue -Content $aiContent -Name "OPENAI_API_KEY" -Value $aiKey
+                $aiContent = Set-EnvValue -Content $aiContent -Name "OPENAI_API_BASE" -Value $aiBase
+                $aiContent = Set-EnvValue -Content $aiContent -Name "OPENAI_MODEL" -Value $aiModel
+                Set-Content -Path $backendEnv -Value $aiContent -Encoding UTF8
+                Write-Host "[OK] API Key 验证通过并已写入 backend/.env。" -ForegroundColor Green
+                $configured = $true
+            }
+            else {
+                Write-Host "  Key / 地址 / 模型有误（第 $attempt 次）。" -ForegroundColor Yellow
+            }
+        }
+        if (-not $configured) {
+            Write-Host "[WARN] 未完成配置，可稍后手动编辑 backend/.env 的 OPENAI_API_KEY 并重启 backend 容器。" -ForegroundColor Yellow
+        }
+    }
 }
 
 # ------------------------------------------------------------

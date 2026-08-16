@@ -79,7 +79,7 @@ Write-Host "=== All Services Started ===" -ForegroundColor Cyan
 Write-Host ""
 Write-Host "Access URLs:"
 Write-Host "  User UI:        http://localhost:5173"
-Write-Host "  Admin:          http://localhost:5174/admin.html"
+Write-Host "  Admin:          http://localhost:5174/"
 Write-Host "  Backend API:    http://localhost:8000/docs (Swagger)"
 Write-Host "  MinIO Console:  http://localhost:9001"
 Write-Host ""

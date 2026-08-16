@@ -1,0 +1,211 @@
+# ============================================================
+# Data Insight Platform - Docker Compose 模板
+# ============================================================
+# 使用方式：
+#   1. 复制本文件为 docker-compose.yml：  copy docker-compose.example.yml docker-compose.yml
+#   2.（可选）在项目根目录创建 .env，按需覆盖下方 ${VAR:-默认值} 中的默认密码/密钥
+#   3. 启动：  docker-compose up -d --build
+#
+# 安全提示：
+#   - 所有敏感项均通过 ${VAR:-默认值} 形式提供，默认值仅用于本地开发快速启动
+#   - 生产环境务必通过根目录 .env 设置强密码，切勿使用默认值
+#   - backend/.env 提供容器内运行配置（数据库连接、API Key 等），已由 .gitignore 排除
+# ============================================================
+
+version: "3.8"
+
+services:
+  # ==================== 后端服务 ====================
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: data-insight-backend
+    # uvicorn 多 worker:避免单个请求卡死导致整个 backend 不可用
+    # --workers 2:2 个工作进程,一个卡死时另一个继续服务
+    # --limit-concurrency 100:限制并发请求数,防止突发流量压垮
+    # --timeout-keep-alive 30:keep-alive 连接 30 秒超时,释放空闲连接
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers 2 --limit-concurrency 100 --timeout-keep-alive 30
+    ports:
+      - "8000:8000"
+    env_file:
+      - ./backend/.env
+    environment:
+      - DATABASE_URL=postgresql://${POSTGRES_USER:-datainsight}:${POSTGRES_PASSWORD:-datainsight123}@postgres:5432/data_insight
+      - REDIS_ENABLED=true
+      - REDIS_URL=redis://:${REDIS_PASSWORD:-redis123456}@redis:6379/0
+      - CELERY_ENABLED=true
+      - CELERY_BROKER_URL=redis://:${REDIS_PASSWORD:-redis123456}@redis:6379/1
+      - CELERY_RESULT_BACKEND=redis://:${REDIS_PASSWORD:-redis123456}@redis:6379/2
+      - CLICKHOUSE_ENABLED=true
+      - CLICKHOUSE_HOST=clickhouse
+      - CLICKHOUSE_PORT=8123
+      - CLICKHOUSE_USER=${CLICKHOUSE_USER:-default}
+      - CLICKHOUSE_PASSWORD=${CLICKHOUSE_PASSWORD:-clickhouse123456}
+      - CLICKHOUSE_DATABASE=analysis
+      - MINIO_ENDPOINT=minio:9000
+      - MINIO_ACCESS_KEY=${MINIO_ACCESS_KEY:-minioadmin}
+      - MINIO_SECRET_KEY=${MINIO_SECRET_KEY:-minioadmin123}
+      - MINIO_BUCKET=data-insight
+      - MINIO_SECURE=false
+    volumes:
+      - ./backend/app:/app/app
+      - /var/run/docker.sock:/var/run/docker.sock
+    depends_on:
+      - redis
+    networks:
+      - data-insight-network
+    restart: unless-stopped
+
+  # ==================== 前端服务 ====================
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: data-insight-frontend
+    ports:
+      - "80:80"
+    depends_on:
+      - backend
+    networks:
+      - data-insight-network
+    restart: unless-stopped
+
+  # ==================== Redis 缓存服务 ====================
+  redis:
+    image: redis:7-alpine
+    container_name: data-insight-redis
+    command: redis-server --requirepass ${REDIS_PASSWORD:-redis123456}
+    ports:
+      - "6379:6379"
+    volumes:
+      - ./docker-data/redis:/data
+    networks:
+      - data-insight-network
+    restart: unless-stopped
+
+  # ==================== PostgreSQL 数据库 ====================
+  postgres:
+    image: postgres:17-alpine
+    container_name: data-insight-postgres
+    environment:
+      - POSTGRES_USER=${POSTGRES_USER:-datainsight}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-datainsight123}
+      - POSTGRES_DB=data_insight
+      # 自动清理长时间占用事务的连接,防止连接泄漏导致系统卡死
+      # idle_in_transaction_session_timeout=60s:超过 60 秒的 idle in transaction 自动终止
+      # statement_timeout=300s:单个 SQL 超过 5 分钟自动终止
+      - POSTGRES_INITDB_ARGS=--encoding=UTF-8
+    ports:
+      - "5433:5432"  # 映射到 5433 避免与本地 PostgreSQL 冲突
+    volumes:
+      - ./docker-data/postgres:/var/lib/postgresql/data
+      - ./init.sql:/docker-entrypoint-initdb.d/init.sql
+    networks:
+      - data-insight-network
+    restart: unless-stopped
+    # 启动后设置超时参数(已存在的数据库不会受 POSTGRES_INITDB_ARGS 影响)
+    command: >
+      postgres
+      -c idle_in_transaction_session_timeout=60000
+      -c statement_timeout=300000
+
+  # ==================== ClickHouse 分析引擎 ====================
+  clickhouse:
+    image: clickhouse/clickhouse-server:latest
+    container_name: data-insight-clickhouse
+    environment:
+      - CLICKHOUSE_USER=${CLICKHOUSE_USER:-default}
+      - CLICKHOUSE_PASSWORD=${CLICKHOUSE_PASSWORD:-clickhouse123456}
+      - CLICKHOUSE_DB=analysis
+    ports:
+      - "8123:8123"
+      - "9004:9000"
+    volumes:
+      # 命名卷（Docker VM 内部 Linux 文件系统管理）：绑定挂载到 Windows 文件系统时
+      # ClickHouse 提交 INSERT 的目录 rename（tmp_insert → 正式 part）会 Permission denied
+      # （文件系统错误码 1001），导致所有写入失败。命名卷无此问题。
+      - clickhouse-data:/var/lib/clickhouse
+    networks:
+      - data-insight-network
+    restart: unless-stopped
+
+  # ==================== Celery Worker ====================
+  celery-worker:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: data-insight-celery
+    # 所有参数从 .env 读取（config.py 收口），修改上限只需改 .env 无需改 docker-compose
+    # --concurrency:并行 worker 进程数,防止单个长任务卡死全队列
+    # --time-limit/--soft-time-limit:命令行兜底时间限制(秒),与代码内配置双重保险
+    command: >
+      celery -A app.services.task_manager worker --loglevel=info
+      --concurrency=${CELERY_CONCURRENCY:-2}
+      --time-limit=${CELERY_TASK_TIME_LIMIT:-1800}
+      --soft-time-limit=${CELERY_TASK_SOFT_TIME_LIMIT:-1500}
+    environment:
+      - CELERY_BROKER_URL=redis://:${REDIS_PASSWORD:-redis123456}@redis:6379/1
+      - CELERY_RESULT_BACKEND=redis://:${REDIS_PASSWORD:-redis123456}@redis:6379/2
+      - DATABASE_URL=postgresql://${POSTGRES_USER:-datainsight}:${POSTGRES_PASSWORD:-datainsight123}@postgres:5432/data_insight
+      - ASYNC_THRESHOLD=${ASYNC_THRESHOLD:-10000}
+      - CELERY_CONCURRENCY=${CELERY_CONCURRENCY:-2}
+      - CELERY_TASK_TIME_LIMIT=${CELERY_TASK_TIME_LIMIT:-1800}
+      - CELERY_TASK_SOFT_TIME_LIMIT=${CELERY_TASK_SOFT_TIME_LIMIT:-1500}
+      - CELERY_WORKER_PREFETCH_MULTIPLIER=${CELERY_WORKER_PREFETCH_MULTIPLIER:-1}
+      # 任务排队机制配置（与 backend 服务保持一致，支持 .env 覆盖）
+      - MAX_RUNNING_PER_USER=${MAX_RUNNING_PER_USER:-2}
+      - MAX_PENDING_PER_USER=${MAX_PENDING_PER_USER:-10}
+      # MinIO 配置：容器内必须用服务名 minio:9000，不能用 localhost
+      # celery-worker 导入 storage_manager 时需要初始化 MinIO 客户端，缺少配置会导致启动失败
+      - MINIO_ENDPOINT=minio:9000
+      - MINIO_ACCESS_KEY=${MINIO_ACCESS_KEY:-minioadmin}
+      - MINIO_SECRET_KEY=${MINIO_SECRET_KEY:-minioadmin123}
+      - MINIO_BUCKET=data-insight
+      - MINIO_SECURE=false
+      # ClickHouse 配置：部分异步任务（如数据挖掘）可能需要写入分析结果
+      - CLICKHOUSE_ENABLED=true
+      - CLICKHOUSE_HOST=clickhouse
+      - CLICKHOUSE_PORT=8123
+      - CLICKHOUSE_USER=${CLICKHOUSE_USER:-default}
+      - CLICKHOUSE_PASSWORD=${CLICKHOUSE_PASSWORD:-clickhouse123456}
+      - CLICKHOUSE_DATABASE=analysis
+    depends_on:
+      - redis
+      - postgres
+      - minio
+    volumes:
+      - ./backend/app:/app/app
+      - ./backend/.env:/app/.env
+      - /var/run/docker.sock:/var/run/docker.sock
+    networks:
+      - data-insight-network
+    restart: unless-stopped
+
+  # ==================== MinIO 对象存储 ====================
+  minio:
+    image: minio/minio:latest
+    container_name: data-insight-minio
+    command: server /data --console-address ":9001"
+    environment:
+      - MINIO_ROOT_USER=${MINIO_ACCESS_KEY:-minioadmin}
+      - MINIO_ROOT_PASSWORD=${MINIO_SECRET_KEY:-minioadmin123}
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - ./docker-data/minio:/data
+    networks:
+      - data-insight-network
+    restart: unless-stopped
+
+# ==================== 数据卷 ====================
+volumes:
+  # ClickHouse 数据卷（命名卷，Docker VM 内部 Linux 文件系统管理）
+  # 避免绑定挂载在 Windows 文件系统上 rename 权限问题导致 INSERT 失败（错误码 1001）
+  clickhouse-data:
+
+# ==================== 网络 ====================
+networks:
+  data-insight-network:
+    driver: bridge

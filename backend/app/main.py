@@ -38,12 +38,18 @@ STATIC_DIR = os.path.join(BASE_DIR, "static")
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """应用生命周期事件处理 - 替代旧的 on_event 方式"""
-    # 启动时初始化
-    try:
-        init_db()
-        print(" 数据库初始化完成")
-    except Exception as e:
-        print(f" 数据库初始化警告: {e}")
+    # 启动时初始化（重试等待数据库就绪，避免 postgres 未 ready 时建表失败导致表缺失）
+    for attempt in range(1, 11):
+        try:
+            init_db()
+            print(" 数据库初始化完成")
+            break
+        except Exception as e:
+            print(f" 数据库初始化警告（第 {attempt} 次）: {e}")
+            if attempt >= 10:
+                print("  数据库初始化失败，请检查数据库连接")
+                break
+            time.sleep(3)
 
     log_system("应用启动")
 

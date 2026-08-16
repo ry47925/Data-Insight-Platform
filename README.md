@@ -134,6 +134,24 @@ npm run dev:admin  # 管理端 http://localhost:5174/admin.html
 | `ASYNC_THRESHOLD` | 异步触发阈值（行数，默认 10000） |
 | `MINIO_ENDPOINT` / `MINIO_ACCESS_KEY` / `MINIO_SECRET_KEY` | MinIO 对象存储（必需） |
 
+## 常见问题（FAQ）
+
+**1. 启动时镜像拉取失败（`unexpected EOF` / `short read`）**
+
+多为访问 Docker Hub 网络不稳定所致（国内网络常见）。可任选其一：
+
+- **直接重试**：拉取支持断点续传，重新运行启动命令即可
+- **配置镜像加速器**：Docker Desktop 设置 → Docker Engine → 添加 `registry-mirrors`。国内镜像源地址变动频繁、稳定性不一，请**自行搜索当前可用的源**（关键词如 "docker 镜像加速"）
+- **使用代理**：Docker Desktop 设置 → Resources → Proxies 填入代理地址
+
+**2. 首次启动/构建耗时很长**
+
+首次构建需在容器内拉取镜像并安装 Python/Node 依赖，属正常现象；后续启动会复用缓存明显加快。
+
+**3. 提示端口被占用**
+
+脚本启动前会自动检查所需端口（8000/5173/5174/5433/6379/9000/9001/8123），被占用时报错退出，释放端口后重试即可。
+
 ## 功能模块
 
 - **数据管理**：数据集与产物统一管理、数据血缘、回收站、跨模块导入、远程数据源（MySQL/PostgreSQL）

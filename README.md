@@ -56,7 +56,7 @@ docker compose --profile dev up -d --build    # 开发模式
 
 | 模式 | 用户端 | 管理后台 | API 文档 |
 | --- | --- | --- | --- |
-| 开发（dev） | http://localhost:5173 | http://localhost:5174/admin.html | http://localhost:8000/docs |
+| 开发（dev） | http://localhost:5173 | http://localhost:5174/ | http://localhost:8000/docs |
 | 生产（prod） | http://localhost | http://localhost/admin.html | http://localhost:8000/docs |
 
 > 首次启动为**全新的空系统**（不含任何示例数据）；如需 AI 分析，配置方法见下文「配置 AI 分析」。
@@ -117,7 +117,7 @@ cd backend
 cd frontend
 npm install
 npm run dev        # 用户端 http://localhost:5173
-npm run dev:admin  # 管理端 http://localhost:5174/admin.html
+npm run dev:admin  # 管理端 http://localhost:5174/
 ```
 
 ### 后端环境变量（backend/.env）

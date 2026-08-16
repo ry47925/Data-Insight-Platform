@@ -289,7 +289,7 @@ else {
 # ------------------------------------------------------------
 # 5.1 Wait for frontend readiness（首次需在容器内 npm install，可能较久）
 # ------------------------------------------------------------
-if ($Mode -eq "dev") { $frontUrls = @("http://localhost:5173", "http://localhost:5174/admin.html") }
+if ($Mode -eq "dev") { $frontUrls = @("http://localhost:5173", "http://localhost:5174/") }
 else { $frontUrls = @("http://localhost", "http://localhost/admin.html") }
 Write-Host ""
 Write-Host "[INFO] Waiting for frontend to be ready (first run installs npm dependencies, may take several minutes)..." -ForegroundColor Yellow
@@ -320,7 +320,7 @@ Write-Host ""
 Write-Host "=== Access URLs ===" -ForegroundColor Cyan
 if ($Mode -eq "dev") {
     Write-Host "  User UI:    http://localhost:5173"
-    Write-Host "  Admin UI:   http://localhost:5174/admin.html"
+    Write-Host "  Admin UI:   http://localhost:5174/"
 }
 else {
     Write-Host "  User UI:    http://localhost"

@@ -49,8 +49,9 @@ export default defineConfig(({ command }) => ({
   server: {
     port: 5174,
     proxy: {
-      '/admin': {
-        target: 'http://localhost:8000',
+      // 仅代理 /admin/ API 路径，避免 /admin.html 被误代理导致 500
+      '/admin/': {
+        target: process.env.VITE_API_TARGET || 'http://localhost:8000',
         changeOrigin: true
       }
     }

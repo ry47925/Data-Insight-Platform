@@ -331,3 +331,18 @@ Write-Host ""
 Write-Host "The system starts with an empty database (no sample data)." -ForegroundColor Yellow
 Write-Host "Stop services: docker compose --profile $Mode down" -ForegroundColor Yellow
 Write-Host ""
+
+# ------------------------------------------------------------
+# 7. 汇总账号信息（脚本末尾再次提示，避免用户从头翻找）
+# ------------------------------------------------------------
+$finalEnv = Get-Content -Path $backendEnv -Raw
+$finalUser = ""; $finalPass = ""
+if ($finalEnv -match '(?m)^ADMIN_USERNAME=(.*)$') { $finalUser = $matches[1].Trim() }
+if ($finalEnv -match '(?m)^ADMIN_PASSWORD=(.*)$') { $finalPass = $matches[1].Trim() }
+if ($finalUser -and $finalPass) {
+    Write-Host "=== 管理后台账号 ===" -ForegroundColor Cyan
+    Write-Host "  username: $finalUser"
+    Write-Host "  password: $finalPass"
+    Write-Host "  （修改：编辑 backend/.env 的 ADMIN_USERNAME / ADMIN_PASSWORD，重启 backend 容器生效）" -ForegroundColor DarkGray
+    Write-Host ""
+}

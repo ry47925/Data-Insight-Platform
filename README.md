@@ -34,6 +34,14 @@ watch-celery.ps1    # Celery + Backend 容器热重载监听（改 .py 自动重
 .\start.ps1
 ```
 
+> 在 **CMD（命令提示符）** 中运行 PowerShell 脚本请使用：
+>
+> ```cmd
+> powershell -ExecutionPolicy Bypass -File start.ps1
+> ```
+>
+> `-ExecutionPolicy Bypass` 用于绕过 Windows 默认脚本执行策略限制；`-Mode prod` 可切换生产模式。
+
 脚本会自动完成：检查 Docker 环境与端口 → 从模板生成 `docker-compose.yml`、根 `.env`、`backend/.env`（自动生成随机密码/密钥，已有配置不覆盖）→ 以**开发模式**启动全部服务（后端热重载 + 前端 Vite HMR）→ 等待就绪并输出访问地址。
 
 其他模式：
@@ -58,6 +66,8 @@ docker compose --profile dev up -d --build    # 开发模式
 | --- | --- | --- | --- |
 | 开发（dev） | http://localhost:5173 | http://localhost:5174/ | http://localhost:8000/docs |
 | 生产（prod） | http://localhost | http://localhost/admin.html | http://localhost:8000/docs |
+
+**管理后台账号**：`start.ps1` 启动完成时会在脚本末尾打印 `[ADMIN] username / password`。若未找到，可查看 `backend/.env` 中的 `ADMIN_USERNAME` / `ADMIN_PASSWORD`；修改后需重启 backend 容器生效。
 
 > 首次启动为**全新的空系统**（不含任何示例数据）；如需 AI 分析，配置方法见下文「配置 AI 分析」。
 

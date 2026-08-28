@@ -92,3 +92,53 @@ class AIChatResponse(BaseModel):
     usage: Dict[str, Any]
     needs_context: Optional[List[str]] = None  # AI 请求的补充上下文类型
     suggested_questions: Optional[List[str]] = None  # AI 生成的追问建议列表（preset + dynamic）
+
+
+# ============ AI 数据问答（产品问答模式） ============
+
+class QARequest(BaseModel):
+    """问答请求schema"""
+    question: str
+    dataset_ids: List[int] = []  # 数据目录数据集ID列表（勾选/全选/常驻目录）
+    conversation_id: Optional[int] = None
+    start_new_topic: bool = False
+
+
+class QAResponse(BaseModel):
+    """问答响应schema"""
+    answer: str
+    conversation_id: int
+    usage: Dict[str, Any]
+    relevant: bool = True  # 问题是否与所选数据相关
+    needs_context: Optional[List[str]] = None
+    suggested_questions: Optional[List[str]] = None
+    exec_result: Optional[Dict[str, Any]] = None  # 本地计算结果（前端可选展示）
+
+
+class CatalogBuildRequest(BaseModel):
+    """目录构建请求schema"""
+    dataset_ids: List[int] = []
+
+
+class CatalogBuildResponse(BaseModel):
+    """目录构建响应schema"""
+    datasets: List[Dict[str, Any]] = []
+    total: int = 0
+
+
+class CatalogSaveRequest(BaseModel):
+    """常驻目录保存请求schema"""
+    name: str
+    dataset_ids: List[int]
+    description: Optional[str] = None
+    catalog_id: Optional[int] = None  # 传则更新
+
+
+class CatalogItem(BaseModel):
+    """常驻目录列表项schema"""
+    id: int
+    name: str
+    description: Optional[str] = None
+    dataset_ids: List[int] = []
+    is_default: bool = False
+    created_at: Optional[datetime] = None

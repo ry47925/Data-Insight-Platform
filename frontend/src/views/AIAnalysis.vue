@@ -160,15 +160,17 @@
                             :key="`dataset-${ds.id}`"
                             class="context-item"
                             :class="{ selected: isItemSelected('dataset', ds.id) }"
-                            @click="toggleSelect('dataset', ds.id, ds.name, ds.artifact_type, ds.artifact_label)"
+                            @click="toggleSelect('dataset', ds.id, `${ds.name} (ID:${ds.id})`, ds.artifact_type, ds.artifact_label)"
                           >
                             <el-checkbox
                               :model-value="isItemSelected('dataset', ds.id)"
                               @click.stop
-                              @change="toggleSelect('dataset', ds.id, ds.name, ds.artifact_type, ds.artifact_label)"
+                              @change="toggleSelect('dataset', ds.id, `${ds.name} (ID:${ds.id})`, ds.artifact_type, ds.artifact_label)"
                             />
                             <div class="item-info">
-                              <div class="item-name" :title="ds.name">{{ ds.name }}</div>
+                              <div class="item-name" :title="`${ds.name} | ID:${ds.id}`">
+                                <span class="item-name-text">{{ ds.name }} | ID:{{ ds.id }}</span>
+                              </div>
                               <div class="item-meta">
                                 <el-tag size="small" effect="plain" :type="getArtifactTagType(ds.artifact_type)">
                                   {{ ds.artifact_label || ds.artifact_type }}
@@ -450,16 +452,28 @@
 
         <div class="chat-input-area">
           <div v-if="selectedContextItems.length > 0" class="context-badge">
-            <el-icon><Link /></el-icon>
-            <span>本次对话将注入 {{ selectedContextItems.length }} 个上下文项</span>
-            <el-button
-              text
-              size="small"
-              class="badge-clear-btn"
-              @click="clearSelection"
-            >
-              清空选择
-            </el-button>
+            <div class="context-badge-head">
+              <el-icon><Link /></el-icon>
+              <span>本次对话将注入 {{ selectedContextItems.length }} 个上下文项</span>
+              <el-button text size="small" class="badge-clear-btn" @click="clearSelection">
+                清空选择
+              </el-button>
+            </div>
+            <!-- 已选上下文项 chips：直接在此可逐个取消，不用到上方面板查找 -->
+            <div class="context-badge-chips">
+              <el-tag
+                v-for="item in selectedContextItems"
+                :key="`badge-${item.type}-${item.ref_id}`"
+                size="small"
+                effect="plain"
+                :type="getItemTagType(item)"
+                closable
+                @close="removeSelectedItem(item)"
+              >
+                {{ item.label }}
+                <span v-if="item.auto_source_dataset_id" class="badge-auto-mark">· 血缘</span>
+              </el-tag>
+            </div>
           </div>
           <el-input
             ref="questionInput"
@@ -617,7 +631,7 @@ import {
 import { ElMessage, ElMessageBox } from 'element-plus'
 import {
   aiChat,
-  fetchContextOptions, previewContextItem,
+  fetchContextOptions, previewContextItem, fetchBloodlineOps,
   getAIConfig,
   fetchConversations, fetchConversation, deleteConversation, renameConversation,
   fetchUsageStats,
@@ -1155,11 +1169,20 @@ function isItemSelected(type, refId) {
 }
 
 function toggleSelect(type, refId, label, artifactType, artifactLabel) {
-  const idx = selectedContextItems.value.findIndex(
+  const existing = selectedContextItems.value.some(
     item => item.type === type && item.ref_id === refId
   )
-  if (idx >= 0) {
-    selectedContextItems.value.splice(idx, 1)
+  if (existing) {
+    // 取消选中：从已选项中移除该上下文项
+    selectedContextItems.value = selectedContextItems.value.filter(
+      item => !(item.type === type && item.ref_id === refId)
+    )
+    // 取消选中数据产物时，一并移除由它自动带出的血缘操作（保留用户手动添加的操作）
+    if (type === 'dataset') {
+      selectedContextItems.value = selectedContextItems.value.filter(
+        item => item.auto_source_dataset_id !== refId
+      )
+    }
   } else {
     selectedContextItems.value.push({
       type,
@@ -1168,6 +1191,42 @@ function toggleSelect(type, refId, label, artifactType, artifactLabel) {
       artifact_type: artifactType || '',
       artifact_label: artifactLabel || ''
     })
+    // 选中数据产物时，自动带出它血缘链上的操作（默认选中、标注所属产物、可在已选项中取消）
+    if (type === 'dataset') {
+      autoInjectBloodlineOps(refId)
+    }
+  }
+}
+
+// 选中数据产物后，自动带出它血缘链上的最近操作记录（默认选中，可取消）
+async function autoInjectBloodlineOps(datasetId) {
+  try {
+    const res = await fetchBloodlineOps(datasetId)
+    const ops = res.data?.operations || []
+    let addedCount = 0
+    for (const op of ops) {
+      const exists = selectedContextItems.value.some(
+        item => item.type === 'operation' && item.ref_id === op.id
+      )
+      if (exists) continue
+      // 标注操作所属的产物，便于区分同名产物
+      const opTypeLabel = op.task_type_label || op.task_type || 'unknown'
+      const belongs = op.belongs_to ? ` · ${op.belongs_to}` : ''
+      selectedContextItems.value.push({
+        type: 'operation',
+        ref_id: op.id,
+        label: `任务#${op.id}(${opTypeLabel})${belongs}`,
+        artifact_type: op.task_type || 'unknown',
+        artifact_label: opTypeLabel,
+        auto_source_dataset_id: datasetId
+      })
+      addedCount++
+    }
+    if (addedCount > 0) {
+      ElMessage.info(`已按数据血缘自动带出 ${addedCount} 条操作，可在已选项中取消`)
+    }
+  } catch (e) {
+    console.error('自动带出血缘操作失败:', e)
   }
 }
 
@@ -1414,9 +1473,18 @@ async function sendMessage() {
     // 异常时也重置新话题标记，避免状态残留
     startNewTopicFlag.value = false
     console.error(e)
+    // 尽量透出后端的明确错误原因（如"追问次数已用完""会话已过期"），
+    // 只有拿不到明确信息时才回退到通用兜底文案，避免误导用户以为服务不可用
+    const detail = e?.response?.data?.detail ?? e?.response?.data?.error
+    let errText = '抱歉，AI 服务暂时不可用，请检查网络连接或稍后重试。'
+    if (detail) {
+      errText = Array.isArray(detail)
+        ? detail.map(d => d?.msg || d).join('；')
+        : String(detail)
+    }
     messages.value.push({
       role: 'assistant',
-      content: '抱歉，AI 服务暂时不可用，请检查网络连接或稍后重试。',
+      content: errText,
       time: _formatShanghai(new Date())
     })
   } finally {
@@ -2227,14 +2295,33 @@ function formatDateTime(timeStr) {
 
 .context-badge {
   display: flex;
-  align-items: center;
+  flex-direction: column;
   gap: 6px;
   font-size: 12px;
   color: var(--primary, #4361ee);
   margin-bottom: 8px;
-  padding: 4px 8px;
+  padding: 6px 8px;
   background: var(--primary-light, #eff6ff);
   border-radius: 4px;
+}
+
+.context-badge-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+/* 已选项 chips 横排，可换行；每个可单独点 × 取消，避免到上方面板查找 */
+.context-badge-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+/* 血缘自动带出操作的标记 */
+.context-badge-chips .badge-auto-mark {
+  font-weight: 600;
+  opacity: 0.85;
 }
 
 /* 提示条内的清空按钮：靠右，减少内边距避免过高 */

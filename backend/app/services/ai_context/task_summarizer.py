@@ -74,6 +74,26 @@ def _source_line(task: TaskRecord) -> str:
     return "数据来源: 本地"
 
 
+def _dataset_line(task: TaskRecord, p: dict) -> str:
+    """操作记录引用的输入数据集行，带唯一标识以避免与同名（重名）数据集混淆
+
+    远程任务用"远程表 + 连接ID"标识（数据源在远程库）；本地任务附 (ID)。
+    """
+    p = p or {}
+    name = p.get("dataset_name", "未知")
+    if p.get("is_remote"):
+        cfg = p.get("remote_config")
+        if isinstance(cfg, dict):
+            conn_id = cfg.get("connection_id")
+            table = cfg.get("table_name")
+            if conn_id is not None and table:
+                return f"数据集: {table}（远程，连接ID={conn_id}）"
+        return f"数据集: {name}（远程）"
+    if task.dataset_id and task.dataset_id > 0:
+        return f"数据集: {name} (ID:{task.dataset_id})"
+    return f"数据集: {name}"
+
+
 def summarize_task(task: TaskRecord) -> str:
     """根据任务类型生成配置摘要文本
 
@@ -113,7 +133,7 @@ def _summarize_failed_task(task: TaskRecord, task_type: str) -> str:
     """
     p = task.params or {}
     lines = [f"[操作记录-失败] 任务#{task.id} ({task_type})"]
-    lines.append(f"数据集: {p.get('dataset_name', '未知')}")
+    lines.append(_dataset_line(task, p))
 
     # 失败分类（帮助 AI 判断是否可重试及改进方向）
     # 复用 task_labels 中的常量与函数，避免双重维护
@@ -178,7 +198,7 @@ def _summarize_cleaning(task: TaskRecord) -> str:
     """数据清洗任务摘要"""
     p = task.params or {}
     lines = [f"[操作记录-数据清洗] 任务#{task.id}"]
-    lines.append(f"数据集: {p.get('dataset_name', '未知')}")
+    lines.append(_dataset_line(task, p))
     lines.append(f"清洗方式: {p.get('method', '未知')} | 模式: {p.get('mode', '未知')}")
 
     config = p.get("config", {})
@@ -202,7 +222,7 @@ def _summarize_ml_training(task: TaskRecord) -> str:
     p = task.params or {}
     inner_params = p.get("params", {})
     lines = [f"[操作记录-ML训练] 任务#{task.id}"]
-    lines.append(f"数据集: {p.get('dataset_name', '未知')}")
+    lines.append(_dataset_line(task, p))
     lines.append(f"算法: {p.get('algorithm', '未知')}")
     lines.append(f"任务类型: {inner_params.get('task_type', '未知')} | 目标列: {inner_params.get('target_column', '未知')}")
     lines.append(f"特征列: {inner_params.get('feature_columns', '未知')}")
@@ -229,7 +249,7 @@ def _summarize_ml(task: TaskRecord) -> str:
     p = task.params or {}
     inner_params = p.get("params", {})
     lines = [f"[操作记录-ML分析] 任务#{task.id}"]
-    lines.append(f"数据集: {p.get('dataset_name', '未知')}")
+    lines.append(_dataset_line(task, p))
     lines.append(f"算法: {p.get('algorithm', '未知')}")
     if inner_params:
         lines.append(f"参数: {_params_to_str(inner_params)}")
@@ -245,7 +265,7 @@ def _summarize_data_mining(task: TaskRecord) -> str:
     """数据挖掘任务摘要"""
     p = task.params or {}
     lines = [f"[操作记录-数据挖掘] 任务#{task.id}"]
-    lines.append(f"数据集: {p.get('dataset_name', '未知')}")
+    lines.append(_dataset_line(task, p))
     lines.append(f"操作: {p.get('operation', '未知')} | 算法: {p.get('algorithm', '未知')}")
 
     # 按操作类型补充关键参数
@@ -268,7 +288,7 @@ def _summarize_feature_engineering(task: TaskRecord) -> str:
     """特征工程任务摘要（覆盖 select/construct/encode/scale/reduce）"""
     p = task.params or {}
     lines = [f"[操作记录-特征工程] 任务#{task.id}"]
-    lines.append(f"数据集: {p.get('dataset_name', '未知')}")
+    lines.append(_dataset_line(task, p))
     lines.append(f"操作: {p.get('operation', '未知')}")
     if p.get("target_column"):
         lines.append(f"目标列: {p.get('target_column')}")
@@ -287,7 +307,7 @@ def _summarize_data_analysis(task: TaskRecord) -> str:
     """数据分析任务摘要"""
     p = task.params or {}
     lines = [f"[操作记录-数据分析] 任务#{task.id}"]
-    lines.append(f"数据集: {p.get('dataset_name', '未知')}")
+    lines.append(_dataset_line(task, p))
     lines.append(f"操作: {p.get('operation', '未知')}")
     if p.get("sections"):
         lines.append(f"分析板块: {p.get('sections')}")

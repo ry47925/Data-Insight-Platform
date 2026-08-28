@@ -45,7 +45,7 @@ class AIConversationItem(BaseModel):
     module_type: str
     dataset_id: Optional[int] = None
     message_count: int = 0
-    follow_up_remaining: int = 10
+    follow_up_remaining: int = 999
     created_at: datetime
     updated_at: Optional[datetime] = None
 

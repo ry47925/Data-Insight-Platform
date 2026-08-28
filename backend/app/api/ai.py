@@ -147,6 +147,35 @@ async def get_context_options(
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@router.get("/context/blood-ops")
+async def get_bloodline_operations(
+    dataset_id: int,
+    limit: int = 10,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """获取指定数据产物血缘链上的最近操作记录（前端"选产物自动带出血缘操作"用）
+
+    查询参数：
+      dataset_id: 数据产物（Dataset）ID
+      limit: 返回最近任务条数（默认 10）
+    """
+    ai_service = AIService(db)
+    try:
+        result = ai_service.get_bloodline_operations(
+            dataset_id=dataset_id,
+            user_id=current_user.id,
+            limit=limit
+        )
+        if "error" in result:
+            raise HTTPException(status_code=404, detail=result["error"])
+        return result
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @router.get("/context/preview")
 async def preview_context_item(
     type: str,

@@ -379,6 +379,11 @@ export function previewContextItem(type, refId) {
   return api.get('/ai/context/preview', { params: { type, ref_id: refId } })
 }
 
+// 获取指定数据产物血缘链上的最近操作记录（选产物自动带出血缘操作用）
+export function fetchBloodlineOps(datasetId, limit = 10) {
+  return api.get('/ai/context/blood-ops', { params: { dataset_id: datasetId, limit } })
+}
+
 // AI配置
 export function getAIConfig() {
   return api.get('/ai/config')

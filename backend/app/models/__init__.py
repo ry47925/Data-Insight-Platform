@@ -75,7 +75,7 @@ class AIConversation(Base):
     module_type = Column(String(50), nullable=False)
     title = Column(String(200), nullable=False)
     conversation = Column(JSON)
-    follow_up_remaining = Column(Integer, default=10)
+    follow_up_remaining = Column(Integer, default=999)  # 单话题追问软上限，实际值由 settings.AI_CONVERSATION_FOLLOWUP_MAX 决定
     expires_at = Column(DateTime)
     # 会话历史压缩摘要：超出滑动窗口的旧消息会被压缩为摘要文本存储于此
     summary = Column(Text)
@@ -103,6 +103,23 @@ class AIUsageLog(Base):
     def __repr__(self):
         return f"<AIUsageLog {self.module_type}/{self.total_tokens}>"
 
+class DataCatalog(Base):
+    """AI问答数据目录：可保存一组数据集作为常驻问答目录（小型数据仓库）"""
+    __tablename__ = "data_catalogs"
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, index=True, nullable=False)
+    name = Column(String(100), nullable=False, index=True)  # 目录名称
+    description = Column(Text)  # 目录描述
+    # 包含的数据集ID列表（JSON），记录每个数据集在目录中的作用/备注可选
+    dataset_entries = Column(JSON, nullable=False)
+    # 每个 entry: { "dataset_id": int, "description": str (可选) }
+    is_default = Column(Boolean, default=False)  # 是否为用户默认目录
+    created_at = Column(DateTime, default=shanghai_now)
+    updated_at = Column(DateTime, default=shanghai_now, onupdate=shanghai_now)
+
+    def __repr__(self):
+        return f"<DataCatalog {self.name} #{self.id}>"
 
 class AIConfig(Base):
     """AI配置模型"""

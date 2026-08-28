@@ -6,6 +6,7 @@ from app.config import settings
 from app.services.data_service import DataService
 from app.models import AIConfig, AIConversation, AIUsageLog, Dataset, AIMessage, AIConversationContext, TaskRecord, shanghai_now
 from app.services.ai_context import build_context_bundle, build_system_prompt, compress_conversation
+from sqlalchemy import or_
 from sqlalchemy.orm import Session
 from typing import Optional, Dict, Any, List
 
@@ -183,7 +184,7 @@ class AIService:
         initial_message 仅用于生成标题，不写入 conversation JSON，
         避免与后续 _save_message 写入的 user 消息产生重复。
         """
-        expires_at = datetime.utcnow() + timedelta(minutes=30)
+        expires_at = datetime.utcnow() + timedelta(minutes=settings.AI_CONVERSATION_TTL_MINUTES)
 
         module_names = {
             "data_cleaning": "数据清洗",
@@ -202,7 +203,7 @@ class AIService:
             module_type=module_type,
             title=title,
             conversation=[],
-            follow_up_remaining=10,
+            follow_up_remaining=settings.AI_CONVERSATION_FOLLOWUP_MAX,
             expires_at=expires_at
         )
         
@@ -235,7 +236,7 @@ class AIService:
         if follow_up_remaining is not None:
             conv.follow_up_remaining = follow_up_remaining
 
-        conv.expires_at = datetime.utcnow() + timedelta(minutes=30)
+        conv.expires_at = datetime.utcnow() + timedelta(minutes=settings.AI_CONVERSATION_TTL_MINUTES)
         conv.updated_at = datetime.utcnow()
 
         self.db.commit()
@@ -364,9 +365,9 @@ class AIService:
                 return {"error": "会话不存在"}
             # 会话过期检查：30 分钟无活动后禁止继续对话（修复）
             if self.is_conversation_expired(conv):
-                return {"error": "会话已过期（30 分钟无活动），请开始新话题"}
+                return {"error": "会话已过期（长时间无活动），请开始新话题"}
             # 追问次数检查：耗尽后要求开启新会话（修复）
-            if getattr(conv, "follow_up_remaining", 10) <= 0:
+            if getattr(conv, "follow_up_remaining", settings.AI_CONVERSATION_FOLLOWUP_MAX) <= 0:
                 return {"error": "本话题追问次数已用完，请开启新会话继续提问"}
         else:
             # 创建新会话：标题取问题前30字符
@@ -457,9 +458,9 @@ class AIService:
             updated_messages.append({"role": "assistant", "content": answer})
             self.update_conversation(conv.id, updated_messages)
 
-            # 追问次数递减并刷新过期时间（30 分钟无活动会话自动过期）（修复）
-            conv.follow_up_remaining = max(0, getattr(conv, "follow_up_remaining", 10) - 1)
-            conv.expires_at = datetime.utcnow() + timedelta(minutes=30)
+            # 追问次数递减并刷新过期时间（无活动会话自动过期）（修复）
+            conv.follow_up_remaining = max(0, getattr(conv, "follow_up_remaining", settings.AI_CONVERSATION_FOLLOWUP_MAX) - 1)
+            conv.expires_at = datetime.utcnow() + timedelta(minutes=settings.AI_CONVERSATION_TTL_MINUTES)
             self.db.commit()
 
             # 如果压缩产生了新摘要，更新到数据库
@@ -895,6 +896,18 @@ class AIService:
                         ).first()
                         if conn:
                             remote_connection_name = conn.name
+            # 数据集展示信息：
+            # 远程任务的数据源在远程表，数据集名用"连接名/表名"标识，且不依赖本地产物状态（避免误报回收站）
+            if is_remote_flag:
+                dataset_name_display = remote_table_name or f"远程表（连接:{remote_connection_name or '未知'}）"
+                dataset_status_display = None
+            elif task.dataset_id:
+                dataset_name_display = ds_info.get("name", "未知数据集")
+                dataset_status_display = ds_info.get("status", "deleted")
+            else:
+                dataset_name_display = "无关联数据集"
+                dataset_status_display = None
+
             task_list.append({
                 "id": task.id,
                 "task_type": task_type,
@@ -907,8 +920,8 @@ class AIService:
                 "remote_connection_name": remote_connection_name,
                 "remote_table_name": remote_table_name,
                 "dataset_id": task.dataset_id,
-                "dataset_name": ds_info.get("name", "未知数据集") if task.dataset_id else "无关联数据集",
-                "dataset_status": ds_info.get("status", "deleted") if task.dataset_id else None,
+                "dataset_name": dataset_name_display,
+                "dataset_status": dataset_status_display,
                 "status": task.status,
                 "params": task.params,
                 "result_summary": task.result_summary,
@@ -925,6 +938,81 @@ class AIService:
                 "total": total_tasks,
                 "total_pages": (total_tasks + task_page_size - 1) // task_page_size
             }
+        }
+
+    def get_bloodline_operations(self, dataset_id: int, user_id: int, limit: int = 10) -> Dict[str, Any]:
+        """按数据产物血缘链返回最近操作记录，每条标注其所属产物
+
+        血缘定义：以产物（或数据）的 root_dataset_id 为根，收集血缘内所有数据集，
+        再取这些数据集关联的任务记录（按时间倒序）。用于前端"选产物自动带出血缘操作"，
+        让上下文中产物与其清洗/分析/挖掘/保存等操作天然配对，避免手动勾错/漏勾。
+
+        Args:
+            dataset_id: 数据产物（Dataset）的 ID
+            user_id: 当前用户 ID
+            limit: 返回最近任务条数（默认 10，控制注入量）
+
+        Returns:
+            含血缘根信息 + 操作列表（每条含所属产物标 identity）
+        """
+        from app.utils.common import TASK_TYPE_LABEL_MAP
+        from app.utils.task_labels import OPERATION_LABELS
+
+        ds = self.db.query(Dataset).filter(
+            Dataset.id == dataset_id,
+            Dataset.user_id == user_id,
+            Dataset.status == "active"
+        ).first()
+        if not ds:
+            return {"error": "数据集不存在或不可用"}
+
+        # 血缘根：若产物设置了 root_dataset_id 则用根，否则用自身 ID
+        root = getattr(ds, "root_dataset_id", None) or ds.id
+        # 血缘内所有数据集（根自身 + 以该根为血缘根的所有产物）
+        lineage = self.db.query(Dataset).filter(
+            Dataset.user_id == user_id,
+            or_(Dataset.id == root, Dataset.root_dataset_id == root)
+        ).all()
+        lineage_ids = {d.id for d in lineage}
+        lineage_names = {d.id: d.name for d in lineage}
+
+        # AI 分析用不上的任务大类，与操作历史/上下文选项口径保持一致
+        EXCLUDED_TASK_TYPES = {"upload", "dataset", "ai"}
+        ops = self.db.query(TaskRecord).filter(
+            TaskRecord.user_id == user_id,
+            ~TaskRecord.task_type.in_(EXCLUDED_TASK_TYPES),
+            TaskRecord.status.in_(["success", "failed"]),
+            TaskRecord.dataset_id.in_(lineage_ids)
+        ).order_by(TaskRecord.created_at.desc()).limit(limit).all()
+
+        operation_list = []
+        for t in ops:
+            t_type = t.task_type or "unknown"
+            params = t.params or {}
+            if not isinstance(params, dict):
+                params = {}
+            operation = params.get("operation", "")
+            operation_label = OPERATION_LABELS.get(operation, operation) if operation else ""
+            owner_id = t.dataset_id
+            owner_name = lineage_names.get(owner_id) if owner_id else None
+            operation_list.append({
+                "id": t.id,
+                "task_type": t_type,
+                "task_type_label": TASK_TYPE_LABEL_MAP.get(t_type, t_type),
+                "operation": operation,
+                "operation_label": operation_label,
+                "status": t.status,
+                "dataset_id": owner_id,
+                # 标注该操作所属的产物（血缘内数据集名 + ID），便于用户区分同名产物
+                "belongs_to": f"{owner_name} (ID:{owner_id})" if owner_id and owner_name else (f"ID:{owner_id}" if owner_id else ""),
+                "created_at": t.created_at.isoformat() if t.created_at else None
+            })
+
+        return {
+            "dataset_id": dataset_id,
+            "dataset_name": ds.name,
+            "root_dataset_id": root,
+            "operations": operation_list
         }
 
     def preview_context_item(self, item_type: str, ref_id: int, user_id: int) -> Dict[str, Any]:

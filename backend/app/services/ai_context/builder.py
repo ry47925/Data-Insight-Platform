@@ -151,7 +151,8 @@ def build_context_bundle(
                 Dataset.status == "active"
             ).first()
             if dataset:
-                item.label = dataset.name
+                # label 带 id，便于前端面板与引用区分同名数据集
+                item.label = f"{dataset.name} (ID:{dataset.id})"
                 item.artifact_type = dataset.artifact_type or "raw_data"
                 item.summary = extract_context(dataset)
                 # 收集数据血缘ID
@@ -171,14 +172,19 @@ def build_context_bundle(
                 item.label = f"任务#{ref_id}({task.task_type})"
                 item.artifact_type = task.task_type or "unknown"
                 item.summary = summarize_task(task)
-                # 收集任务关联数据集的数据血缘ID
-                if task.dataset_id:
-                    task_ds = db.query(Dataset).filter(Dataset.id == task.dataset_id).first()
+                # 收集任务关联数据集的数据血缘ID（仅有效的本地数据集ID）
+                params = task.params or {}
+                is_remote = bool(params.get("is_remote"))
+                dataset_id = task.dataset_id
+                if dataset_id and dataset_id > 0:
+                    task_ds = db.query(Dataset).filter(Dataset.id == dataset_id).first()
                     if task_ds:
                         root_id = getattr(task_ds, "root_dataset_id", None) or task_ds.id
                         bloodline_ids.add(root_id)
-                        # 标记数据集状态，用于AI提示
-                        if task_ds.status in ("deleted", "purged"):
+                        # 标记数据集状态，用于AI提示。
+                        # 仅本地数据源任务会提示回收站/已删除；远程任务的数据源在远程表，
+                        # 本地产物/载体即使被删也不代表数据丢失，不应误导用户去恢复。
+                        if not is_remote and task_ds.status in ("deleted", "purged"):
                             status_text = "回收站" if task_ds.status == "deleted" else "已永久删除"
                             item.summary += f"\n[注：关联数据集'{task_ds.name}'当前在{status_text}]"
             else:

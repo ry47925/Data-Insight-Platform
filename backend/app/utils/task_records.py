@@ -14,6 +14,13 @@ def create_task_record(db: Session, task_type: str, user_id: int, dataset_id: in
             - "running"（默认）：同步任务，创建后立即执行
             - "pending"：异步任务，已提交 Celery 但未开始执行，等待 Worker 拉取
     """
+    # 规范化无效/占位数据集 ID（不该再写入 0 这类脏引用，统一归为 NULL）
+    if dataset_id is not None:
+        try:
+            if int(dataset_id) <= 0:
+                dataset_id = None
+        except (TypeError, ValueError):
+            dataset_id = None
     record = TaskRecord(
         task_type=task_type,
         user_id=user_id,

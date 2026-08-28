@@ -60,6 +60,7 @@ class AIConversationDetail(BaseModel):
     follow_up_remaining: int
     created_at: datetime
     updated_at: datetime
+    last_context_items: Optional[List[Dict[str, Any]]] = None  # 上次的上下文快照（恢复用）
 
 
 class AIUsageStatsResponse(BaseModel):

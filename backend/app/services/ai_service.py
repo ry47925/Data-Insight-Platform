@@ -4,6 +4,7 @@ from openai import OpenAI
 from datetime import datetime, timedelta
 from app.config import settings
 from app.services.data_service import DataService
+from app.services.ai_client import LLMClientProvider
 from app.models import AIConfig, AIConversation, AIUsageLog, Dataset, AIMessage, AIConversationContext, TaskRecord, shanghai_now
 from app.services.ai_context import build_context_bundle, build_system_prompt, compress_conversation
 from sqlalchemy import or_
@@ -36,67 +37,22 @@ class AIService:
     def __init__(self, db: Session):
         self.db = db
         self.data_service = DataService(db)
-        self._clients = None
-        self._default_client = None
+        # LLM 客户端/模型/配置统一交给共享 Provider 管理，与问答服务共用一套逻辑
+        self._client_provider = LLMClientProvider(db)
     
     def _get_clients(self):
-        """懒加载AI客户端，优先使用系统API Key"""
-        if self._clients is None:
-            self._clients = {}
-            self._default_client = None
-            
-            if settings.OPENAI_API_KEY:
-                try:
-                    kwargs = {"api_key": settings.OPENAI_API_KEY}
-                    if settings.OPENAI_API_BASE:
-                        kwargs["base_url"] = settings.OPENAI_API_BASE
-                    client = OpenAI(**kwargs)
-                    self._clients["openai"] = client
-                    self._default_client = "openai"
-                except Exception:
-                    pass
-            else:
-                db_config = self._get_active_config()
-                if db_config:
-                    try:
-                        client = self._create_client_from_config(db_config)
-                        if client:
-                            self._clients[db_config.provider] = client
-                            self._default_client = db_config.provider
-                    except Exception:
-                        pass
-        
-        return self._clients
-    
+        """懒加载AI客户端（委托共享 Provider）"""
+        return self._client_provider.get_clients()
+
     def _create_client_from_config(self, config: AIConfig) -> Optional[OpenAI]:
-        """根据配置创建AI客户端"""
-        if not config or not config.api_key:
-            return None
-        
-        base_url = config.base_url
-        if not base_url:
-            if config.provider == "deepseek":
-                base_url = "https://api.deepseek.com"
-            elif config.provider == "openai":
-                base_url = None
-        
-        try:
-            if base_url:
-                return OpenAI(api_key=config.api_key, base_url=base_url)
-            else:
-                return OpenAI(api_key=config.api_key)
-        except Exception:
-            return None
-    
+        """根据配置创建AI客户端（委托共享 Provider）"""
+        return self._client_provider._create_client_from_config(config)
+
     # ========== 配置管理方法 ==========
 
     def _get_active_config(self) -> Optional[AIConfig]:
-        """获取当前激活的AI配置"""
-        try:
-            config = self.db.query(AIConfig).filter(AIConfig.is_active == True).first()
-            return config
-        except Exception:
-            return None
+        """获取当前激活的AI配置（委托共享 Provider）"""
+        return self._client_provider._get_active_config()
 
     def get_config(self) -> Dict[str, Any]:
         """获取AI配置状态，优先使用系统API Key"""
@@ -138,9 +94,8 @@ class AIService:
             self.db.add(new_config)
             self.db.commit()
             
-            self._clients = None
-            self._default_client = None
-            
+            self._client_provider.reset()
+
             return {"success": True, "message": "配置保存成功"}
         except Exception as e:
             self.db.rollback()
@@ -192,10 +147,16 @@ class AIService:
             "feature_engineering": "特征工程",
             "machine_learning": "机器学习",
             "comprehensive": "全方位分析",
-            "general_chat": "智能对话"
+            "general_chat": "分析对话",
+            "ai_qa": "产品问答"
         }
         module_name = module_names.get(module_type, module_type)
-        title = f"{module_name}分析 · {shanghai_now().strftime('%Y-%m-%d %H:%M')}"
+        # 产品问答/分析对话：标题直接使用与模式按钮一致的名称，不带模块参数与时间戳，
+        # 保证历史会话命名与底部按钮"分析对话/产品问答"一致。
+        if module_type in ("ai_qa", "general_chat"):
+            title = module_name
+        else:
+            title = f"{module_name}分析 · {shanghai_now().strftime('%Y-%m-%d %H:%M')}"
 
         new_conv = AIConversation(
             user_id=user_id,
@@ -351,7 +312,7 @@ class AIService:
             包含回答、会话ID、使用情况、needs_context 的字典
         """
         # 检查AI配置
-        client = self._get_clients().get(self._default_client)
+        client = self._client_provider.get_default_client()
         if not client:
             return {"error": "请先配置API Key才能使用AI分析功能"}
 
@@ -469,9 +430,10 @@ class AIService:
                 self.db.commit()
 
             # 保存上下文项快照到会话（便于恢复）
-            # last_context_items 是 JSON 列，直接赋值 Python 对象由 SQLAlchemy 序列化
+            # last_context_items 是 JSON 列，直接赋值 Python 对象由 SQLAlchemy 序列化；
+            # 前端只传 type/ref_id，这里补全 label 等展示字段，避免历史会话恢复时空缺
             if context_items:
-                conv.last_context_items = context_items
+                conv.last_context_items = self._build_context_snapshot(context_items)
                 self.db.commit()
 
             # 记录使用日志
@@ -493,6 +455,90 @@ class AIService:
 
         except Exception as e:
             return {"error": f"AI回复生成失败: {str(e)}"}
+
+    def _build_context_snapshot(self, context_items: List[Dict]):
+        """根据 type/ref_id 补全上下文快照（label/artifact_type 等前端展示字段）
+
+        前端请求只传 type 与 ref_id，为让历史会话恢复正常显示，这里从数据库
+        反查数据集、操作记录的展示信息，生成完整快照供详细接口返回。
+
+        Args:
+            context_items: [{type, ref_id}, ...]
+
+        Returns:
+            补全后的快照列表；无法匹配的记录被跳过
+        """
+        snapshots = []
+        for item in context_items:
+            ctype = item.get("type")
+            ref_id = item.get("ref_id")
+            if not ref_id:
+                continue
+            if ctype == "dataset":
+                ds = self.db.query(Dataset).filter(Dataset.id == ref_id).first()
+                if not ds:
+                    continue
+                snapshots.append({
+                    "type": "dataset",
+                    "ref_id": ref_id,
+                    "label": f"{ds.name} (ID:{ds.id})",
+                    "artifact_type": ds.artifact_type or "",
+                    "artifact_label": ds.artifact_type or ""
+                })
+            else:  # operation
+                task = self.db.query(TaskRecord).filter(TaskRecord.id == ref_id).first()
+                if not task:
+                    continue
+                op_type = task.task_type or "unknown"
+                snapshots.append({
+                    "type": "operation",
+                    "ref_id": ref_id,
+                    "label": f"任务#{task.id}({op_type})",
+                    "artifact_type": op_type,
+                    "artifact_label": op_type
+                })
+        return snapshots
+
+    def _enrich_context_status(self, items: List[Dict]):
+        """对历史会话的上下文快照做实时状态校验，标注已回收/已删除的项
+
+        快照保存后数据集可能被回收站删除、彻底清空或状态变为损坏，任务记录
+        可能被物理清理。这里在返回详情时逐个回查当前状态，附加 status 与
+        status_label 供前端提示，避免用户误以为已删除的数据仍可用于分析。
+
+        Args:
+            items: last_context_items 快照列表（可能为 None）
+
+        Returns:
+            标注状态后的快照列表
+        """
+        STATUS_LABELS = {
+            "deleted": "已移至回收站",
+            "purged": "已彻底删除",
+            "corrupted": "文件已损坏"
+        }
+        enriched = []
+        for item in items or []:
+            it = dict(item)
+            ctype = it.get("type")
+            ref_id = it.get("ref_id")
+            if ctype == "dataset":
+                ds = self.db.query(Dataset).filter(Dataset.id == ref_id).first()
+                if not ds:
+                    it["status"] = "deleted"
+                    it["status_label"] = "已删除"
+                elif (ds.status or "active") != "active":
+                    it["status"] = ds.status
+                    it["status_label"] = STATUS_LABELS.get(ds.status, "已删除")
+                else:
+                    it.setdefault("status", "active")
+            elif ctype == "operation":
+                task = self.db.query(TaskRecord).filter(TaskRecord.id == ref_id).first()
+                if not task:
+                    it["status"] = "deleted"
+                    it["status_label"] = "任务记录已不存在"
+            enriched.append(it)
+        return enriched
 
     def _save_context_items(self, conversation_id: int, context_items: List[Dict]):
         """将上下文项持久化到 ai_conversation_contexts 关联表"""
@@ -1113,11 +1159,5 @@ class AIService:
         }
 
     def _get_model_name(self) -> str:
-        """获取当前使用的模型名称"""
-        if settings.OPENAI_API_KEY and settings.OPENAI_MODEL:
-            return settings.OPENAI_MODEL
-        config = self._get_active_config()
-        if config and config.model:
-            return config.model
-        # 默认模型名：DeepSeek 官方模型为 deepseek-chat（非 deepseek-v4-flash）
-        return "gpt-3.5-turbo" if self._default_client == "openai" else "deepseek-chat"
+        """获取当前使用的模型名称（委托共享 Provider）"""
+        return self._client_provider.get_model_name()

@@ -54,6 +54,7 @@
                 @close="removeSelectedItem(item)"
               >
                 {{ item.label }}
+                <span v-if="item.status && item.status !== 'active'" style="color:#f56c6c;font-weight:600;margin-left:4px;">{{ item.status_label || '已删除' }}</span>
               </el-tag>
             </div>
             <el-button text size="small" class="summary-clear" @click="clearSelection">清空</el-button>
@@ -464,6 +465,34 @@
                       </div>
                     </div>
                   </div>
+                  <!-- 预测来源标注 -->
+                  <div v-if="msg.execResult.result.predict_source" class="qa-pred-source">预测来源：{{ msg.execResult.result.predict_source }}</div>
+                  <!-- 时间外推结果 -->
+                  <div v-if="msg.execResult.result.forecast" class="qa-pred-forecast">
+                    <el-alert
+                      v-if="msg.execResult.result.forecast.error"
+                      type="warning"
+                      :closable="false"
+                      show-icon
+                      :title="'时间外推已跳过：' + msg.execResult.result.forecast.error"
+                    />
+                    <template v-else>
+                      <div class="qa-pred-forecast-title">
+                        <span class="qa-pred-forecast-badge">外推</span>
+                        时间外推（{{ msg.execResult.result.forecast.method }}）
+                      </div>
+                      <div class="qa-pred-forecast-grid">
+                        <div class="qa-pred-forecast-item">
+                          <span class="qa-pred-forecast-label">最新周期（{{ msg.execResult.result.forecast.latest_time }}）</span>
+                          <span class="qa-pred-forecast-value">{{ msg.execResult.result.forecast.current_prediction }}</span>
+                        </div>
+                        <div class="qa-pred-forecast-item">
+                          <span class="qa-pred-forecast-label">下一周期（{{ msg.execResult.result.forecast.next_time }}）</span>
+                          <span class="qa-pred-forecast-value qa-pred-forecast-next">{{ msg.execResult.result.forecast.next_prediction }}</span>
+                        </div>
+                      </div>
+                    </template>
+                  </div>
                   <div v-if="msg.execResult.result.sample_rows && msg.execResult.result.sample_rows.length" class="qa-pred-samples-label">预测明细（前 {{ msg.execResult.result.sample_rows.length }} 条）</div>
                   <el-table
                     v-if="msg.execResult.result.sample_rows && msg.execResult.result.sample_rows.length"
@@ -570,7 +599,7 @@
           <!-- Tab 1: 快捷模板（始终可用） -->
           <div v-if="activeFollowupTab === 'templates'" class="followup-list">
             <el-button
-              v-for="cmd in quickCommands"
+              v-for="cmd in displayQuickCommands"
               :key="cmd"
               size="small"
               round
@@ -621,6 +650,7 @@
               >
                 {{ item.label }}
                 <span v-if="item.auto_source_dataset_id" class="badge-auto-mark">· 血缘</span>
+                <span v-if="item.status && item.status !== 'active'" style="color:#f56c6c;font-weight:600;margin-left:4px;">{{ item.status_label || '已删除' }}</span>
               </el-tag>
             </div>
           </div>
@@ -896,13 +926,26 @@ const selectedDatasetsCount = computed(() =>
 // 模块名、产物类型名、任务类型名优先使用后端返回的 *_label 字段
 // 标签映射函数统一复用 utils/labels.js，避免本地维护重复映射
 
-// 快捷命令（空会话时展示的模板）
+// 快捷命令（空会话时展示的模板）——分析对话与产品问答使用不同模板集
 const quickCommands = [
   '分析这份数据的核心特征',
   '数据质量是否存在问题？',
   '模型准确率为什么偏低？',
   '给出改进建议'
 ]
+
+// 产品问答模式的专属快捷模板：面向数据仓库精确统计/筛选/分组/预测场景
+const qaQuickCommands = [
+  '这个数据集共有多少条记录？',
+  '按某一列分组统计各组的数量',
+  '预测下一周期的目标值',
+  '各列的类型和缺失情况如何？'
+]
+
+// 根据当前模式返回对应的快捷模板列表
+const displayQuickCommands = computed(() =>
+  qaMode.value ? qaQuickCommands : quickCommands
+)
 
 // ========== 追问建议状态 ==========
 // AI 回答后生成的追问建议列表（来自后端 suggested_questions 字段）
@@ -1445,12 +1488,15 @@ function switchMode(mode) {
   stopThinkingAnimation()
   aiThinking.value = false
   messages.value = []
+  question.value = ''               // 切换模式时清空输入框中尚未发送的内容
   currentConversationId.value = null
   startNewTopicFlag.value = false
   selectedContextItems.value = []
   suggestedQuestions.value = []
   activeFollowupTab.value = 'templates'
   contextPanelExpanded.value = false
+  // 产品问答特有条目的常驻目录选中态一并清空，避免切换模式后残留
+  qaSelectedCatalogId.value = null
 }
 
 // 一键全选：将当前加载的全部数据产物选入数据仓库（仅数据产物，不含操作记录）
@@ -1976,6 +2022,26 @@ async function checkConfigStatus() {
 
 // ========== 会话管理 ==========
 
+// 恢复历史会话上下文时，对后端快照缺 label/展示字段的记录做兜底补全，
+// 避免出现"含叉但内容空白"的空白 chip（兼容旧会话的残缺快照）
+function enrichRestoredContext(items) {
+  return items.map(it => {
+    const item = { ...it }
+    if (item.label && String(item.label).trim()) return item
+    if (item.type === 'dataset') {
+      const ds = allDatasets.value.find(d => d.id === item.ref_id)
+      if (ds) {
+        item.label = `${ds.name} (ID:${ds.id})`
+        item.artifact_type = ds.artifact_type || ''
+        item.artifact_label = ds.artifact_label || ds.artifact_type || ''
+      }
+    } else {
+      item.label = `任务#${item.ref_id}`
+    }
+    return item
+  })
+}
+
 async function loadConversations() {
   loadingConversations.value = true
   try {
@@ -1993,6 +2059,12 @@ async function loadConversation(conv) {
     const res = await fetchConversation(conv.id)
     const data = res.data || {}
     const msgs = data.conversation || data.messages || []
+    // 根据会话类型切换到对应模式（ai_qa=产品问答，其余=分析对话），
+    // 避免从历史打开产品问答时仍停留在分析对话模式
+    const targetMode = data.module_type === 'ai_qa' ? 'qa' : 'chat'
+    activeMode.value = targetMode
+    stopThinkingAnimation()
+    aiThinking.value = false
     messages.value = msgs.map(m => ({
       role: m.role,
       content: m.content,
@@ -2000,11 +2072,25 @@ async function loadConversation(conv) {
       usage: m.usage || 0
     }))
     currentConversationId.value = conv.id
-    // 切换会话时清空追问建议、已选上下文项并重置 Tab，避免跨会话串数据
-    selectedContextItems.value = []
+    startNewTopicFlag.value = false
+    // 恢复上一次的上下文（所选数据产物/操作记录），缺失则置空避免串数据
+    selectedContextItems.value = Array.isArray(data.last_context_items)
+      ? enrichRestoredContext(data.last_context_items)
+      : []
+    // 若会话上下文中有已删除/已回收的数据或任务，提醒用户注意
+    const goneCount = selectedContextItems.value.filter(
+      i => i.status && i.status !== 'active'
+    ).length
+    if (goneCount > 0) {
+      ElMessage.warning(`该会话中有 ${goneCount} 项数据/任务已删除或放入回收站，已在上下文中标注提醒，可手动移除`)
+    }
+    // 恢复上下文后不再沿用常驻目录选中态
+    qaSelectedCatalogId.value = null
+    // 切换会话时清空追问建议、重置 Tab，避免跨会话串数据
     suggestedQuestions.value = []
     activeFollowupTab.value = 'templates'
     showHistoryDialog.value = false
+    contextPanelExpanded.value = false
     ElMessage.success('已加载历史会话')
   } catch (e) {
     // 加载失败：保留当前消息列表，提示错误且不关闭弹窗，
@@ -2625,8 +2711,8 @@ function formatDateTime(timeStr) {
 .quick-commands {
   display: flex;
   flex-direction: column;
-  gap: 8px;
-  padding: 0 16px 8px;
+  gap: 4px;
+  padding: 0 14px 6px;
   border-top: 1px solid var(--border-light, #f0f0f0);
   flex-shrink: 0;
 }
@@ -2635,7 +2721,7 @@ function formatDateTime(timeStr) {
 .followup-tabs {
   display: flex;
   gap: 4px;
-  padding-bottom: 6px;
+  padding-bottom: 2px;
   border-bottom: 1px solid var(--border-light, #f0f0f0);
 }
 
@@ -2689,8 +2775,8 @@ function formatDateTime(timeStr) {
   align-items: center;
   gap: 8px;
   flex-wrap: wrap;
-  padding-top: 6px;
-  min-height: 32px;
+  padding-top: 4px;
+  min-height: 28px;
 }
 
 .followup-empty {
@@ -2938,6 +3024,9 @@ function formatDateTime(timeStr) {
 .conv-icon.icon-comprehensive {
   background: linear-gradient(135deg, #f87171, #ef4444);
 }
+.conv-icon.icon-ai_qa {
+  background: linear-gradient(135deg, #38bdf8, #0284c7);
+}
 
 .conv-title-wrap {
   flex: 1;
@@ -3022,18 +3111,29 @@ function formatDateTime(timeStr) {
 .mode-tab {
   display: inline-flex;
   align-items: center;
-  gap: 5px;
+  justify-content: center;
+  gap: 4px;
   border: none;
   background: transparent;
-  padding: 6px 14px;
-  border-radius: 5px;
-  font-size: 13px;
+  padding: 0 10px;
+  height: 24px;
+  border-radius: 4px;
+  font-size: 12px;
+  line-height: 1;
   color: var(--text-secondary, #555);
   cursor: pointer;
   transition: all 0.2s;
+  box-sizing: border-box;
+}
+/* 图标组件渲染为 <svg>，需显式限制尺寸，否则默认大小会撑高按钮 */
+.mode-tab svg {
+  width: 14px !important;
+  height: 14px !important;
+  display: block;
 }
 .mode-tab .el-icon {
-  vertical-align: -1px;
+  vertical-align: middle;
+  font-size: 14px;
 }
 .mode-tab.active {
   background: #fff;
@@ -3189,5 +3289,58 @@ function formatDateTime(timeStr) {
   font-size: 12px;
   color: var(--text-muted, #999);
   margin: 6px 0 4px;
+}
+/* 预测来源标注 */
+.qa-pred-source {
+  font-size: 12px;
+  color: var(--text-muted, #999);
+  padding: 2px 0 4px;
+}
+/* 时间外推结果 */
+.qa-pred-forecast {
+  margin: 4px 0 8px;
+  padding: 10px 12px;
+  background: var(--bg-secondary, #f5f7fa);
+  border: 1px dashed var(--el-border-color, #dcdfe6);
+  border-radius: 6px;
+}
+.qa-pred-forecast-title {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-primary);
+  margin-bottom: 8px;
+}
+.qa-pred-forecast-badge {
+  font-size: 11px;
+  font-weight: 600;
+  color: #fff;
+  background: var(--el-color-warning, #e6a23c);
+  border-radius: 3px;
+  padding: 1px 6px;
+}
+.qa-pred-forecast-grid {
+  display: flex;
+  gap: 24px;
+  flex-wrap: wrap;
+}
+.qa-pred-forecast-item {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.qa-pred-forecast-label {
+  font-size: 12px;
+  color: var(--text-muted, #999);
+}
+.qa-pred-forecast-value {
+  font-size: 18px;
+  font-weight: 700;
+  color: var(--el-color-primary, #409eff);
+}
+.qa-pred-forecast-next {
+  color: var(--el-color-success, #67c23a);
 }
 </style>

@@ -314,6 +314,7 @@ async def get_conversation(
             "dataset_id": conv.dataset_id,
             "conversation": messages_data,
             "follow_up_remaining": conv.follow_up_remaining,
+            "last_context_items": ai_service._enrich_context_status(getattr(conv, "last_context_items", None)),
             "created_at": conv.created_at,
             "updated_at": conv.updated_at
         }

@@ -57,6 +57,7 @@
                   :key="col"
                   :prop="col"
                   :label="col"
+                  :formatter="formatCell"
                   min-width="100"
                 />
               </el-table>
@@ -283,6 +284,7 @@
                     :key="col"
                     :prop="col"
                     :label="col"
+                    :formatter="formatCell"
                     min-width="100"
                   />
                 </el-table>
@@ -403,6 +405,19 @@ const total = ref(0)
 const structureVisible = ref(false)
 const currentStructure = ref(null)
 const currentTableInfo = ref(null)
+
+// 表格单元格格式化：对象/数组以 JSON 呈现，避免显示 [object Object]
+function formatCell(row, column, cellValue) {
+  if (cellValue === null || cellValue === undefined) return ''
+  if (typeof cellValue === 'object') {
+    try {
+      return JSON.stringify(cellValue, null, 2)
+    } catch (e) {
+      return String(cellValue)
+    }
+  }
+  return cellValue
+}
 
 const sqlQuery = ref('')
 const queryResult = ref(null)
@@ -532,6 +547,11 @@ const tableDescriptions = reactive({
     description: 'WARNING/ERROR 级别日志异步入库记录（运行日志模块数据源）',
     usage: '✓ 已使用 - logger.py DbLogHandler 自动写库；服务总览"今日错误"、运行日志趋势/汇总均基于此表',
     howToAdd: '后端任意模块产生 WARNING/ERROR 日志时自动异步批量写入'
+  },
+  data_catalogs: {
+    description: 'AI 产品问答的常驻数据目录（一组数据集保存为小型数据仓库，用户可快速复用）',
+    usage: '✓ 已使用 - AI 分析模块"产品问答"Tab 中保存/选择常驻目录；按 user_id 隔离',
+    howToAdd: '在 AI 分析模块切换到"产品问答"，勾选数据产物后点击"保存为目录"'
   },
   app_config: {
     description: '应用全局配置键值对（不依赖环境变量，服务重启不丢失）',

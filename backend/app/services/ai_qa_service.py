@@ -2,12 +2,14 @@ import json
 import re
 from typing import Any, Dict, List, Optional
 
+import numpy as np
 import pandas as pd
 from sqlalchemy.orm import Session
 
 from app.config import settings
 from app.models import Dataset, AIConversation
 from app.services.ai_service import AIService
+from app.services.ai_context.prompts_qa import SYSTEM_INTENT, SYSTEM_QA
 from app.services.data_service import DataService
 
 
@@ -116,7 +118,7 @@ class AIQAService:
             无关: {"relevant": False, "reason": "...", "usage": {...}}
             失败: {"error": "..."}
         """
-        client = self.ai_service._get_clients().get(self.ai_service._default_client)
+        client = self.ai_service._client_provider.get_default_client()
         if not client:
             return {"error": "请先配置API Key才能使用AI问答功能"}
 
@@ -125,31 +127,6 @@ class AIQAService:
 
         catalog_text = self._catalog_to_prompt(catalog)
 
-        system_intent = """你是数据问答意图解析器。用户会给出数据目录和一个问题，你需要：
-1. 判断目录中是否有与问题相关的数据表（可从表名、字段名、字段类型判断）。
-2. 如果完全没有相关表，返回 {"relevant": false, "reason": "简述为什么无关"}。
-3. 如果相关，返回结构化查询意图 JSON：
-{
-  "relevant": true,
-  "intent": {
-    "dataset_ids": [相关数据集ID],
-    "target_column": "要统计/预测的列名（若无填 null）",
-    "aggregation": "count/sum/mean/max/min/groupby/filter/null（count=计数，filter=只筛选不聚合）",
-    "group_by": "分组维度列名（如省份/年份，无则 null）",
-    "filters": [{"column": "列名", "op": "eq/gt/lt/gte/lte/contains/in", "value": 值或数组}],
-    "time_column": "时间列名（若问题涉及年份/日期则填，无则 null）",
-    "time_range": {"start": "2020-01-01", "end": "2023-12-31"} 或 null,
-    "needs_model": false,
-    "reasoning": "一句话说明你的选择依据"
-  }
-}
-规则：
-- 只允许使用目录中出现过的字段名，不能虚构字段。
-- aggregation=count 时 target_column 可为 null；group_by 存在时用 groupby。
-- **预测类问题（"预测/用XX模型/对未来XX"）：目录中存在 ml_model 数据集时必须设 needs_model=true**，并在 dataset_ids 里同时包含该模型数据集和待预测数据集的ID。这是硬性要求：只要用户提到"预测""模型""明年/未来产量"等词，就必须走 needs_model=true，不能退化为对现有字段的 count/groupby 统计。
-- 纯统计问题（"平均/总数/占比/分布"等）才用 aggregation/group_by，且不设 needs_model。
-- 时间列若为数值年份（如 2023），直接作为数值处理，filters 中用 eq/gt 等即可。
-"""
         user_intent = f"【数据目录】\n{catalog_text}\n\n【用户问题】\n{question}"
 
         try:
@@ -157,7 +134,7 @@ class AIQAService:
             response = client.chat.completions.create(
                 model=model_name,
                 messages=[
-                    {"role": "system", "content": system_intent},
+                    {"role": "system", "content": SYSTEM_INTENT},
                     {"role": "user", "content": user_intent}
                 ],
                 temperature=0.1,
@@ -183,9 +160,66 @@ class AIQAService:
                         continue
                 intent["dataset_ids"] = clean_ids
                 parsed["intent"] = intent
+            # 兜底：LLM 判为无关，但问题明显是在询问当前数据集的元数据（各列类型/缺失/结构）时，
+            # 直接降级为 profile 概览，避免因未匹配到具体列名而误判无关（产品问答默认在问勾选的数据）
+            if not parsed.get("relevant"):
+                fallback = self._fallback_meta_related(question, catalog)
+                if fallback:
+                    return {**fallback, "usage": usage}
             return {**parsed, "usage": usage}
         except Exception as e:
             return {"error": f"意图解析失败: {str(e)}"}
+
+    def _fallback_meta_related(self, question: str, catalog: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """目录内有数据，但问题在询问数据本身概况（各列类型/缺失/结构/有哪些列）时，
+        不因未命中具体列名就判无关，降级为对首张相关表的元数据概览（aggregation=profile）。
+
+        Args:
+            question: 用户问题
+            catalog: 数据目录
+
+        Returns:
+            命中则返回可用的意图结果；否则 None
+        """
+        datasets = catalog.get("datasets") or []
+        if not datasets:
+            return None
+        # 分布/异常值相关 → describe；各列/类型/缺失/结构 → profile
+        describe_keywords = re.compile(
+            r"(分布情况|分布形态|数值分布|分布特征|均值|标准差|方差|分位数|四分位|"
+            r"集中趋势|离散程度|异常值|离群|异常点|极值|多大.*波动|整体.*水平)",
+            re.I
+        )
+        meta_keywords = re.compile(
+            r"(各列|每一列|列的类型|每列.*类型|字段类型|有哪些列|没有.*列|"
+            r"缺失情况|缺失值|缺.*数据|数据概览|数据结构|数据情况|字段情况|有哪些字段)",
+            re.I
+        )
+        if describe_keywords.search(question):
+            aggregation = "describe"
+        elif meta_keywords.search(question):
+            aggregation = "profile"
+        else:
+            return None
+        ds_top = datasets[0]
+        reasoning = ("问题在询问数据的分布统计与异常值情况，直接对该表数值列做描述性统计。"
+                     if aggregation == "describe"
+                     else "问题在询问数据表各列的类型与缺失情况，属于元数据概览，直接查看该表的列概况。")
+        return {
+            "relevant": True,
+            "intent": {
+                "dataset_ids": [ds_top["dataset_id"]],
+                "target_column": None,
+                "aggregation": aggregation,
+                "group_by": None,
+                "filters": [],
+                "time_column": None,
+                "time_range": None,
+                "requires_group_column": False,
+                "needs_model": False,
+                "reasoning": reasoning
+            }
+        }
 
     def _extract_usage(self, response) -> Dict[str, int]:
         """提取 token 用量（与 AIService 保持一致）"""
@@ -199,6 +233,84 @@ class AIQAService:
 
     # ========== 第二步：本地精确计算 ==========
 
+    def _detect_group_missing_column(self, intent: Dict[str, Any], user_id: int) -> Optional[Dict[str, Any]]:
+        """分组意图但缺分组列：加载数据集，提取可分组候选列，返回引导结果
+
+        当意图解析标记了 requires_group_column=true（用户说了"分组统计/占比分布"等
+        但未指明按哪个字段分组），从主数据集提取候选分组列，交由 AI 自然引导用户选择，
+        避免退化为返回总行数或僵硬地罗列错误原因。
+
+        Returns:
+            命中: {"success": True, "result_type": "group_hint",
+                   "result": {"candidate_columns": [...], "aggregation": "..."},
+                   "dataset_labels": {...}}
+            未命中（无需引导）: None
+        """
+        if not intent.get("requires_group_column"):
+            return None
+        dataset_ids = intent.get("dataset_ids") or []
+        if not dataset_ids:
+            return None
+
+        ds_id = dataset_ids[0]
+        ds = self.db.query(Dataset).filter(
+            Dataset.id == ds_id, Dataset.user_id == user_id, Dataset.status == "active"
+        ).first()
+        if not ds:
+            return None
+
+        # 从 schema 提取字段类型，优先作为候选分组列判断依据（低开销）
+        schema = ds.schema or {}
+        col_schema = schema.get("columns", schema) if isinstance(schema, dict) else []
+        schema_types = {}
+        if isinstance(col_schema, list):
+            for col in col_schema:
+                if isinstance(col, dict):
+                    name = col.get("name") or col.get("column") or ""
+                    schema_types[name] = (col.get("type") or col.get("dtype") or "").lower()
+                else:
+                    schema_types[str(col)] = ""
+        elif isinstance(col_schema, dict):
+            schema_types = {str(k): str(v).lower() for k, v in col_schema.items()}
+
+        # 数值/时间类列不适合作为分组维度，过滤掉
+        numeric_hits = ("int", "float", "number", "datetime", "date", "bool", "id")
+        candidates = []
+        for col, ctype in schema_types.items():
+            if col and not any(h in ctype for h in numeric_hits):
+                candidates.append(col)
+        # 若 schema 信息不足以判断（空），尝试加载真实数据推断候选列
+        if not candidates:
+            try:
+                df = self.data_service.load_dataset(ds_id)
+                df = self._coerce_numeric(df)
+                for col in df.columns:
+                    # 低基数（近似分类）列作为候选分组维度
+                    try:
+                        nunique = df[col].nunique(dropna=True)
+                    except Exception:
+                        continue
+                    if nunique <= min(200, max(1, len(df) // 2)):
+                        candidates.append(col)
+            except Exception:
+                candidates = []
+            candidates = candidates[:20]
+
+        if not candidates:
+            return None
+
+        aggregation = intent.get("aggregation") or "count"
+        return {
+            "success": True,
+            "result_type": "group_hint",
+            "result": {
+                "candidate_columns": candidates[:20],
+                "aggregation": aggregation
+            },
+            "computed_by": "pandas",
+            "dataset_labels": {ds_id: ds.name}
+        }
+
     def execute_intent(self, intent: Dict[str, Any], user_id: int) -> Dict[str, Any]:
         """第二步：按意图在本地执行精确计算，返回结果（不依赖 LLM 算术）
 
@@ -210,6 +322,11 @@ class AIQAService:
         dataset_ids = intent.get("dataset_ids") or []
         if not dataset_ids:
             return {"success": False, "error": "未指定数据集"}
+
+        # 分组意图但缺分组列：识别并返回候选分组列，交由 AI 自然引导追问（不返回计算值）
+        group_hint = self._detect_group_missing_column(intent, user_id)
+        if group_hint:
+            return group_hint
 
         # 模型预测分支：needs_model=true 时在目录中查找 ml_model 数据集，不依赖顺序
         if intent.get("needs_model"):
@@ -245,10 +362,115 @@ class AIQAService:
         if df.empty:
             return {"success": False, "error": "数据集为空，无法计算"}
 
+        # 元数据概览：询问"各列类型/缺失/结构"时，直接返回每列类型与缺失统计
+        agg = intent.get("aggregation") or "count"
+        if agg == "profile":
+            return self._run_profile(df, ds)
+        # 分布统计：询问"均值/标准差/四分位/分布/异常值"时，计算数值列描述统计与异常值
+        if agg == "describe":
+            return self._run_describe(df, ds, intent)
+
         try:
             return self._aggregate_dataframe(df, ds, intent)
         except Exception as e:
             return {"success": False, "error": f"聚合计算失败: {str(e)}"}
+
+    def _run_profile(self, df: pd.DataFrame, ds: Dataset) -> Dict[str, Any]:
+        """统计每列的数据类型与缺失情况（元数据概览）
+
+        Args:
+            df: 已加载的 DataFrame
+            ds: 数据集对象
+
+        Returns:
+            {"success": True, "result_type": "profile",
+             "result": {"row_count", "columns": [{column, type, null_count, null_rate}]}, ...}
+        """
+        total = len(df)
+        columns = []
+        for col in df.columns:
+            s = df[col]
+            nulls = int(s.isna().sum())
+            columns.append({
+                "column": str(col),
+                "type": str(s.dtype),
+                "null_count": nulls,
+                "null_rate": round(nulls / total, 4) if total else 0
+            })
+        return {
+            "success": True,
+            "result_type": "profile",
+            "result": {"row_count": total, "columns": columns},
+            "computed_by": "pandas",
+            "dataset_labels": {ds.id: ds.name}
+        }
+
+    def _run_describe(self, df: pd.DataFrame, ds: Dataset, intent: Dict[str, Any]) -> Dict[str, Any]:
+        """数值列分布统计与异常值检测（描述性统计）
+
+        对指定数值列（未指定则覆盖全部数值列）计算：
+        均值、标准差、最小/最大、四分位数（Q1/中位数/Q3），
+        并基于 IQR=Q3-Q1 以 1.5 倍箱线图法则判定异常值数量与比例。
+
+        Args:
+            df: 已加载的 DataFrame
+            ds: 数据集对象
+            intent: 查询意图（可选 target_column 限制到单列）
+
+        Returns:
+            {"success": True, "result_type": "describe",
+             "result": {"row_count", "columns": [{"column", "count", "mean", "std", "min",
+                           "q1", "median", "q3", "max", "outlier_count", "outlier_rate", "null_count"}]}, ...}
+        """
+        target = intent.get("target_column")
+        total = len(df)
+
+        # 数值列：target 指定则只用它（须为数值列），否则取全部数值列
+        numeric_cols = list(df.select_dtypes(include=["number"]).columns)
+        if target:
+            cols = [target] if target in df.columns and target in numeric_cols else []
+        else:
+            cols = numeric_cols
+        if not cols:
+            return {"success": False, "error": "未找到可做分布统计的数值列，请指定一个数值列后再试"}
+
+        stats = []
+        for c in cols:
+            s = df[c].dropna()
+            n = int(s.count())
+            if n == 0:
+                stats.append({"column": c, "count": 0, "null_count": int(df[c].isna().sum()),
+                              "mean": None, "std": None, "min": None, "q1": None,
+                              "median": None, "q3": None, "max": None,
+                              "outlier_count": 0, "outlier_rate": 0.0})
+                continue
+            q1, med, q3 = s.quantile([0.25, 0.5, 0.75]).tolist()
+            iqr = q3 - q1
+            lower = q1 - 1.5 * iqr
+            upper = q3 + 1.5 * iqr
+            outliers = int(s[(s < lower) | (s > upper)].count())
+            stats.append({
+                "column": c,
+                "count": n,
+                "mean": round(float(s.mean()), 4),
+                "std": round(float(s.std()), 4) if n > 1 else 0,
+                "min": round(float(s.min()), 4),
+                "q1": round(float(q1), 4),
+                "median": round(float(med), 4),
+                "q3": round(float(q3), 4),
+                "max": round(float(s.max()), 4),
+                "outlier_count": outliers,
+                "outlier_rate": round(outliers / total, 4) if total else 0,
+                "null_count": int(df[c].isna().sum())
+            })
+
+        return {
+            "success": True,
+            "result_type": "describe",
+            "result": {"row_count": total, "columns": stats},
+            "computed_by": "pandas",
+            "dataset_labels": {ds.id: ds.name}
+        }
 
     def _aggregate_dataframe(self, df: pd.DataFrame, ds: Dataset, intent: Dict[str, Any]) -> Dict[str, Any]:
         """对 DataFrame 执行聚合/筛选"""
@@ -367,6 +589,7 @@ class AIQAService:
         # 找待预测数据集：意图中的其他数据集，或同血缘的 raw_data
         dataset_ids = intent.get("dataset_ids") or []
         predict_ds_id = None
+        source_desc = "意图指定"
         for did in dataset_ids:
             if did != model_ds.id:
                 predict_ds_id = did
@@ -382,9 +605,36 @@ class AIQAService:
             ).order_by(Dataset.id.desc()).all()
             if candidates:
                 predict_ds_id = candidates[0].id
+                source_desc = "血缘自动匹配"
 
-        if not predict_ds_id:
-            return {"success": False, "error": "未找到待预测数据集，请同时选择模型和待预测数据"}
+        # 仍无待预测数据：自动回退到模型训练数据集（model_ds.parent_id）做全量预测
+        # 这样用户只选了模型也能立即得到预测结果，而不是报"未找到待预测数据集"
+        training_ds_id = None
+        if not predict_ds_id and model_ds.parent_id:
+            train_ds = self.db.query(Dataset).filter(
+                Dataset.id == model_ds.parent_id,
+                Dataset.user_id == user_id,
+                Dataset.status == "active"
+            ).first()
+            if train_ds:
+                training_ds_id = train_ds.id
+
+        if not predict_ds_id and not training_ds_id:
+            return {"success": False, "error": "未找到待预测数据集，请同时选择模型和待预测数据，或先关联训练数据"}
+
+        to_encode_df = None
+        if predict_ds_id:
+            try:
+                to_encode_df = self.data_service.load_dataset(predict_ds_id)
+            except Exception:
+                to_encode_df = None
+        if to_encode_df is None and training_ds_id:
+            predict_ds_id = training_ds_id
+            source_desc = "训练数据回退"
+            try:
+                to_encode_df = self.data_service.load_dataset(training_ds_id)
+            except Exception:
+                return {"success": False, "error": "训练数据加载失败，无法回退预测"}
 
         try:
             model_bytes = self._read_file_bytes(model_ds)
@@ -397,7 +647,7 @@ class AIQAService:
             feature_encoders = model_data.get("feature_encoders", {}) or {}
             model_algo = model_data.get("algorithm", "")
 
-            df = self.data_service.load_dataset(predict_ds_id)
+            df = to_encode_df.copy() if to_encode_df is not None else self.data_service.load_dataset(predict_ds_id)
             df = self._coerce_numeric(df)
             missing = [c for c in feature_columns if c not in df.columns]
             if missing:
@@ -453,9 +703,25 @@ class AIQAService:
                     "max": self._json_safe(df[pred_col].max()),
                     "mean": self._json_safe(df[pred_col].mean())
                 }
-            # 若存在年份列，给出分年汇总（可选）
+            # ===== 滚动外推一周期（仅当存在可识别的时间列）=====
+            # 原理：将训练数据最新一条记录的时间特征前滚一个周期，其余特征保持，
+            # 喂给模型得到"下一期"的预测值。这是对"预测未来"的轻量实现，不含新时序模型。
+            forecast = None
+            time_col = self._detect_time_column(predict_ds_id, df, feature_columns)
+            if time_col and not task_type == "classification":
+                try:
+                    forecast = self._rolling_forecast(df, time_col, X, pipeline)
+                except Exception as _fe:
+                    forecast = {"error": f"时间外推失败: {str(_fe)}"}
+
             # 仅保留少量样本行注入 prompt（控制 token 消耗），精确汇总仍全量
             summary["sample_rows"] = df.head(10).to_dict(orient="records")
+            if forecast is not None:
+                summary["forecast"] = forecast
+
+            # 预测数据来源标注（供前端/AI 说明是训练数据回退还是显式选择）
+            summary["predict_source"] = source_desc
+            summary["predict_dataset_name"] = self._dataset_label(predict_ds_id) or "?"
 
             return {
                 "success": True,
@@ -467,6 +733,95 @@ class AIQAService:
             }
         except Exception as e:
             return {"success": False, "error": f"模型预测失败: {str(e)}"}
+
+    def _dataset_label(self, dataset_id: int) -> str:
+        """获取数据集名称（用于预测来源标注）"""
+        if not dataset_id:
+            return ""
+        try:
+            ds = self.db.query(Dataset).filter(Dataset.id == dataset_id).first()
+            return ds.name if ds else ""
+        except Exception:
+            return ""
+
+    def _detect_time_column(self, dataset_id, df, feature_columns):
+        """检测数据中可用于滚动外推的时间列
+
+        优先：feature_columns 中 datetime 类型，或名称含 时间/年/月/date/year/month 的数值列。
+        返回列名或 None。
+        """
+        # 1) datetime/datetime64 类型列
+        for col in df.columns:
+            if str(df[col].dtype).startswith("datetime"):
+                return col
+        # 2) 名称含时间关键词的数值列（时间戳/年份）
+        keywords = ("时间", "年", "月", "date", "year", "month", "time", "日期", "period", "周期")
+        for col in feature_columns:
+            if col in df.columns:
+                low = str(col).lower()
+                if any(k.lower() in low for k in keywords):
+                    return col
+        return None
+
+    def _rolling_forecast(self, df, time_col, X, pipeline):
+        """滚动外推一周期：取最新一条记录，把时间特征前滚一周期后预测
+
+        时间列可能是 datetime64（直接步长+1）或数值（年份/月份，推测周期单位后 +1）。
+        生成下一期预测，同时输出本期（最新记录）预测作为对比。
+        """
+        last_idx = X.index[-1]
+        last_features = X.loc[[last_idx]].copy()
+        raw = df[time_col]
+        # 判断时间列类型：优先 datetime64；其次尝试将字符串日期（'YYYY-MM-DD' 等）解析为 datetime
+        is_datetime = str(raw.dtype).startswith("datetime")
+        if not is_datetime and raw.dtype == object:
+            parsed = pd.to_datetime(raw, errors="coerce")
+            if parsed.notna().sum() >= len(raw) * 0.8:
+                df[time_col] = parsed
+                raw = parsed
+                is_datetime = True
+        if is_datetime:
+            last_time = df.loc[last_idx, time_col]
+            # 推算步长：若为年/月粒度则 +1（月）+12（年以12个月计）
+            # 简单策略：若值为 Timestamp，则推断频率，默认 +1 个月
+            period = pd.DateOffset(months=1)
+            next_time = last_time + period
+            # 将下期时间填入特征（datetime64 列转为 timestamp 数值，与训练一致）
+            next_features = last_features.copy()
+            next_features[time_col] = pd.to_numeric(pd.Series([next_time]), errors="coerce").iloc[0]
+        else:
+            # 数值时间列（年份/月份）：推断周期
+            series = pd.to_numeric(df[time_col], errors="coerce")
+            diffs = series.dropna().diff().dropna()
+            step = int(diffs.median()) if not diffs.empty and diffs.median() not in (0, None) else 1
+            if step == 0 or pd.isna(step):
+                step = 1
+            last_val = series.loc[last_idx] if last_idx in series.index else series.iloc[-1]
+            next_val = float(last_val) + step
+            next_features = last_features.copy()
+            next_features[time_col] = next_val
+
+        # 对下期特征做与本期相同的编码后预测
+        np_features = next_features.to_numpy()
+        try:
+            next_pred = pipeline.predict(np_features)[0]
+        except Exception:
+            next_pred = None
+
+        current_pred = pipeline.predict(last_features.to_numpy())[0]
+        # (label_encoder 反编码已在主流程处理，这里用原始预测值即可，交由 AI 解读)
+        if np.isscalar(next_pred):
+            next_time_str = str(next_time) if is_datetime else str(float(series.loc[last_idx]) + step)
+            return {
+                "period": "下一周期",
+                "method": "滚动外推一周期（基于训练数据最新记录）",
+                "current_prediction": self._json_safe(current_pred),
+                "next_prediction": self._json_safe(next_pred),
+                "time_column": time_col,
+                "latest_time": str(df.loc[last_idx, time_col]),
+                "next_time": next_time_str
+            }
+        return None
 
     def _read_file_bytes(self, ds: Dataset) -> bytes:
         """从本地/MinIO 读取模型文件字节（复用 storage_manager 路径）"""
@@ -502,24 +857,56 @@ class AIQAService:
             return f"（计算失败：{exec_result.get('error', '未知错误')}）"
 
         labels = exec_result.get("dataset_labels", {})
-        label_text = ", ".join(f"#{k}({v})" for k, v in labels.items()) or "?"
-        computed_by = exec_result.get("computed_by", "?")
+        label_text = "、".join(str(v) for v in labels.values()) or "相关数据集"
 
         result = exec_result.get("result", {})
+        if exec_result.get("result_type") == "group_hint":
+            # 分组意图但缺列名：把候选分组列以自然语言呈现给 AI 做追问引导，不注入计算值
+            candidates = result.get("candidate_columns", [])
+            agg = result.get("aggregation") or "数量"
+            cand_text = "、".join(f"「{c}」" for c in candidates[:12])
+            return (
+                f"【需要补充分组列】用户提出了分组统计意图（{agg}），但未指定按哪个字段分组。"
+                f"请从候选字段中选择最合适的一个（或自然询问用户希望按哪个字段分组，例如：{cand_text}），"
+                f"得到用户确认后再计算。请用自然、口语化的语气引导用户补充分组字段，不要罗列错误原因。"
+            )
         if exec_result.get("result_type") == "aggregate":
             return (
-                f"【后端已精确计算结果（来源数据集: {label_text}，计算方式: {computed_by}）】\n"
+                f"【后端已基于「{label_text}」精确计算得到以下结果（数值均为精确值，请直接用于回答）：】\n"
                 f"{json.dumps(result, ensure_ascii=False, default=str)}\n"
             )
         if exec_result.get("result_type") == "rows":
             return (
-                f"【后端已精确筛选结果（来源数据集: {label_text}，共 {result.get('count', 0)} 行，展示前 {len(result.get('rows', []))} 行）】\n"
+                f"【后端已从「{label_text}」精确筛选出 {result.get('count', 0)} 行，以下为展示的前 {len(result.get('rows', []))} 行：】\n"
                 f"{json.dumps(result.get('rows', []), ensure_ascii=False, default=str)}\n"
             )
         if exec_result.get("result_type") == "prediction":
             return (
-                f"【模型预测结果（模型: {label_text}，计算方式: {computed_by}）】\n"
+                f"【基于模型对「{label_text}」的预测结果如下（请直接用于回答，并按外推时间自然呈现：】\n"
                 f"{json.dumps(result, ensure_ascii=False, default=str)}\n"
+            )
+        if exec_result.get("result_type") == "profile":
+            cols = result.get("columns", [])
+            total = result.get("row_count", 0)
+            lines = "\n".join(
+                f"- {c['column']}（类型 {c['type']}）：缺失 {c['null_count']} 行（{c['null_rate'] * 100:.1f}%）"
+                for c in cols
+            )
+            return (
+                f"【基于「{label_text}」共 {total} 行，各列类型与缺失情况如下，请据此直接、自然地回答：】\n{lines}\n"
+            )
+        if exec_result.get("result_type") == "describe":
+            cols = result.get("columns", [])
+            total = result.get("row_count", 0)
+            lines = "\n".join(
+                f"- {c['column']}：样本 {c['count']}，均值 {c['mean']}，标准差 {c['std']}，"
+                f"最小 {c['min']} / Q1 {c['q1']} / 中位数 {c['median']} / Q3 {c['q3']} / 最大 {c['max']}，"
+                f"异常值（箱线图法则）{c['outlier_count']} 个（{c['outlier_rate'] * 100:.1f}%）"
+                for c in cols
+            )
+            return (
+                f"【基于「{label_text}」共 {total} 行，数值列分布统计与异常值检测结果如下"
+                f"（异常值按四分位距 Q3-Q1 的 1.5 倍箱线图法则判定），请据此直接、自然地回答：】\n{lines}\n"
             )
         return "（无结果）"
 
@@ -544,7 +931,7 @@ class AIQAService:
             {"answer", "conversation_id", "usage", "needs_context", "suggested_questions",
              "relevant": bool, "exec_result": {...}（可选）}
         """
-        client = self.ai_service._get_clients().get(self.ai_service._default_client)
+        client = self.ai_service._client_provider.get_default_client()
         if not client:
             return {"error": "请先配置API Key才能使用AI问答功能"}
 
@@ -619,15 +1006,9 @@ class AIQAService:
             pass  # 已在上面处理
 
         # ===== 第三步：结果注入主对话，AI 解读 =====
-        system_qa = """你是数据问答助手。用户会提供【后端已精确计算的结果】和原始问题，你需要：
-1. 基于计算结果直接、准确地回答用户问题，数字必须与提供的结果一致，不得编造或改动。
-2. 若计算失败或结果为空，如实说明原因，不要臆造数据。
-3. 回答使用自然语言，简洁清晰；可以补充必要的解读（如对比、趋势），但不得脱离结果数据。
-4. 若结果中只有部分信息，明确说明哪些已计算、哪些无法得出。
-"""
 
         history_messages = self.ai_service._load_conversation_messages(conv)
-        all_messages = [{"role": "system", "content": system_qa}]
+        all_messages = [{"role": "system", "content": SYSTEM_QA}]
         history_only = [m for m in history_messages if m["role"] in ("user", "assistant")]
         historical_summary = getattr(conv, "summary", None)
         try:
@@ -665,6 +1046,18 @@ class AIQAService:
                 minutes=settings.AI_CONVERSATION_TTL_MINUTES)
             if compressed.get("new_summary"):
                 conv.summary = compressed["new_summary"]
+
+            # 保存本次选择的数据目录快照，便于从历史会话恢复上一轮的数据集上下文
+            conv.last_context_items = [
+                {
+                    "type": "dataset",
+                    "ref_id": d["dataset_id"],
+                    "label": f"{d['name']} (ID:{d['dataset_id']})",
+                    "artifact_type": d.get("artifact_type"),
+                    "artifact_label": d.get("artifact_type") or d.get("module_label")
+                }
+                for d in catalog["datasets"]
+            ]
             self.db.commit()
 
             self.ai_service._log_usage(

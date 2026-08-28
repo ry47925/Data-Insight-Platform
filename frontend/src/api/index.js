@@ -4,7 +4,7 @@ import { reactive } from 'vue'
 
 const api = axios.create({
   baseURL: '/api',
-  timeout: 30000,
+  timeout: 120000,
   // 数组参数序列化为 key=val&key=val（不带方括号），兼容 FastAPI Query(list) 多值参数
   paramsSerializer: { indexes: null }
 })

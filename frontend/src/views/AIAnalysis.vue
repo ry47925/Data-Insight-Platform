@@ -1599,16 +1599,30 @@ function isGroupedResult(execResult) {
   return !!(execResult && execResult.success && execResult.result && execResult.result.grouped)
 }
 
-// 判断是否为模型预测结果
+// 判断是否为模型预测结果（分类 top_predictions / 回归 prediction_stats 均算）
 function isPredictionResult(execResult) {
-  return !!(execResult && execResult.success && execResult.result && execResult.result.top_predictions)
+  if (!execResult || !execResult.success) return false
+  if (execResult.result_type === 'prediction') return true
+  const r = execResult.result
+  return !!(r && (r.top_predictions || r.prediction_stats))
 }
 
 // 预测分布对象（k:v），用于缩放条展示
+// 分类：top_predictions=[{value,count}]；回归：prediction_stats={min,max,mean}
 function predictionDistribution(execResult) {
-  const stats = execResult?.result?.prediction_stats || {}
-  if (stats && typeof stats === 'object' && Object.keys(stats).length > 0) return stats
-  return null
+  const r = execResult?.result
+  if (!r) return null
+  if (!r.top_predictions) {
+    const stats = r.prediction_stats || {}
+    if (stats && typeof stats === 'object' && Object.keys(stats).length > 0) return stats
+    return null
+  }
+  // 转为 {value: count}，供分布条渲染
+  const dist = {}
+  for (const item of r.top_predictions) {
+    if (item && item.value !== undefined) dist[item.value] = item.count
+  }
+  return Object.keys(dist).length ? dist : null
 }
 
 // 计算预测分布中各分类的占比（用于缩放条宽度，0-100）

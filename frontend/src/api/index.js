@@ -4,7 +4,7 @@ import { reactive } from 'vue'
 
 const api = axios.create({
   baseURL: '/api',
-  timeout: 30000,
+  timeout: 120000,
   // 数组参数序列化为 key=val&key=val（不带方括号），兼容 FastAPI Query(list) 多值参数
   paramsSerializer: { indexes: null }
 })
@@ -377,6 +377,42 @@ export function fetchContextOptions(taskPage = 1, taskPageSize = 20, options = {
 // 预览单个上下文项的摘要内容
 export function previewContextItem(type, refId) {
   return api.get('/ai/context/preview', { params: { type, ref_id: refId } })
+}
+
+// 获取指定数据产物血缘链上的最近操作记录（选产物自动带出血缘操作用）
+export function fetchBloodlineOps(datasetId, limit = 10) {
+  return api.get('/ai/context/blood-ops', { params: { dataset_id: datasetId, limit } })
+}
+
+// ====== AI 产品问答（数据仓库精确问答/预测） ======
+// 基于数据目录（多个/全部数据产物）的精确问答：两步选表 → 本地精确计算 → AI 解读
+// datasetIds: 数据目录数据集ID列表
+// startNewTopic: 是否开始新话题
+export function qaChat(question, datasetIds = [], conversationId = null, startNewTopic = false) {
+  const data = { question, dataset_ids: datasetIds }
+  if (conversationId) data.conversation_id = conversationId
+  if (startNewTopic) data.start_new_topic = true
+  return api.post('/ai/qa', data)
+}
+
+// 构建问答数据目录（轻量 schema 信息，不载入全量数据）
+export function buildQaCatalog(datasetIds = []) {
+  return api.post('/ai/qa/catalog', { dataset_ids: datasetIds })
+}
+
+// 列出用户保存的常驻目录
+export function listQaCatalogs() {
+  return api.get('/ai/qa/catalogs')
+}
+
+// 保存/更新常驻目录（catalog_id 传则更新，不传则新建）
+export function saveQaCatalog(data) {
+  return api.post('/ai/qa/catalogs', data)
+}
+
+// 删除常驻目录
+export function deleteQaCatalog(catalogId) {
+  return api.delete(`/ai/qa/catalogs/${catalogId}`)
 }
 
 // AI配置

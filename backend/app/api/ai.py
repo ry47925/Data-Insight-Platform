@@ -7,9 +7,12 @@ from app.schemas.ai import (
     AIConfigResponse, AIConfigSaveResponse, AIConfigTestResponse,
     AIConversationItem, AIConversationDetail,
     AIUsageStatsResponse,
-    AIChatRequest, AIChatResponse
+    AIChatRequest, AIChatResponse,
+    QARequest, QAResponse, CatalogBuildRequest, CatalogBuildResponse,
+    CatalogSaveRequest, CatalogItem
 )
 from app.services.ai_service import AIService
+from app.services.ai_qa_service import AIQAService
 from app.utils.db import get_db
 from app.utils.security import get_current_user
 from app.utils.task_records import create_task_record, update_task_record
@@ -143,6 +146,35 @@ async def get_context_options(
             is_remote=is_remote,
             task_type=task_type
         )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/context/blood-ops")
+async def get_bloodline_operations(
+    dataset_id: int,
+    limit: int = 10,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """获取指定数据产物血缘链上的最近操作记录（前端"选产物自动带出血缘操作"用）
+
+    查询参数：
+      dataset_id: 数据产物（Dataset）ID
+      limit: 返回最近任务条数（默认 10）
+    """
+    ai_service = AIService(db)
+    try:
+        result = ai_service.get_bloodline_operations(
+            dataset_id=dataset_id,
+            user_id=current_user.id,
+            limit=limit
+        )
+        if "error" in result:
+            raise HTTPException(status_code=404, detail=result["error"])
+        return result
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -282,6 +314,7 @@ async def get_conversation(
             "dataset_id": conv.dataset_id,
             "conversation": messages_data,
             "follow_up_remaining": conv.follow_up_remaining,
+            "last_context_items": ai_service._enrich_context_status(getattr(conv, "last_context_items", None)),
             "created_at": conv.created_at,
             "updated_at": conv.updated_at
         }
@@ -308,6 +341,90 @@ async def delete_conversation(
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+# ==================== AI 数据问答（产品问答模式） ====================
+# 与"分析型对话"隔离：独立会话(module_type=ai_qa)、独立提示词、本地精确计算
+# 链路：目录构建 → 两步LLM选表 → 后端计算 → 结果注入解读
+
+@router.post("/qa", response_model=QAResponse)
+async def ai_qa_chat(
+    request: QARequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """产品问答：基于数据目录的精确问答/预测
+
+    用户可勾选多个/全部数据产物（或选择已保存的常驻目录）作为数据目录，
+    后端在目录上做意图解析与本地计算，AI 只负责解读计算结果。
+    无关问题时返回 relevant=false 并列举目录引导补充数据。
+    """
+    qa_service = AIQAService(db)
+    result = qa_service.chat_with_qa(
+        question=request.question,
+        dataset_ids=request.dataset_ids,
+        conversation_id=request.conversation_id,
+        user_id=current_user.id,
+        start_new_topic=request.start_new_topic
+    )
+    if "error" in result:
+        raise HTTPException(status_code=400, detail=result["error"])
+    return result
+
+
+@router.post("/qa/catalog", response_model=CatalogBuildResponse)
+async def build_qa_catalog(
+    request: CatalogBuildRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """构建问答数据目录（轻量 schema 信息，不载入全量数据）"""
+    qa_service = AIQAService(db)
+    return qa_service.build_catalog(request.dataset_ids, current_user.id)
+
+
+@router.get("/qa/catalogs", response_model=List[CatalogItem])
+async def list_qa_catalogs(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """列出用户保存的常驻目录"""
+    qa_service = AIQAService(db)
+    return qa_service.list_catalogs(current_user.id)
+
+
+@router.post("/qa/catalogs")
+async def save_qa_catalog(
+    request: CatalogSaveRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """保存/更新常驻目录（catalog_id 传则更新，不传则新建）"""
+    qa_service = AIQAService(db)
+    result = qa_service.save_catalog(
+        name=request.name,
+        dataset_ids=request.dataset_ids,
+        description=request.description,
+        catalog_id=request.catalog_id,
+        user_id=current_user.id
+    )
+    if "error" in result:
+        raise HTTPException(status_code=400, detail=result["error"])
+    return result
+
+
+@router.delete("/qa/catalogs/{catalog_id}")
+async def delete_qa_catalog(
+    catalog_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """删除常驻目录"""
+    qa_service = AIQAService(db)
+    result = qa_service.delete_catalog(catalog_id, current_user.id)
+    if "error" in result:
+        raise HTTPException(status_code=404, detail=result["error"])
+    return result
 
 
 @router.patch("/conversations/{conversation_id}/rename")

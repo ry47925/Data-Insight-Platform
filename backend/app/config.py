@@ -92,6 +92,13 @@ class Settings:
     # 总上限 = MAX_RUNNING_PER_USER(2) + MAX_PENDING_PER_USER(10) = 12
     MAX_PENDING_PER_USER = int(os.getenv("MAX_PENDING_PER_USER", "10"))
 
+    # ===== AI 会话：单话题追问上限与会话有效期 =====
+    # 追问次数上限：控制一个话题内允许连续追问的次数（软上限，避免无限 token 累积）
+    # 会话有效期（分钟）：会话超过该时长无活动后自动过期，需开始新话题
+    # 均可通过 .env 覆盖，方便开发/生产差异化
+    AI_CONVERSATION_FOLLOWUP_MAX = int(os.getenv("AI_CONVERSATION_FOLLOWUP_MAX", "999"))
+    AI_CONVERSATION_TTL_MINUTES = int(os.getenv("AI_CONVERSATION_TTL_MINUTES", "360"))
+
     MINIO_ENDPOINT = os.getenv("MINIO_ENDPOINT", "localhost:9000")
     MINIO_ACCESS_KEY = os.getenv("MINIO_ACCESS_KEY", "")
     MINIO_SECRET_KEY = os.getenv("MINIO_SECRET_KEY", "")

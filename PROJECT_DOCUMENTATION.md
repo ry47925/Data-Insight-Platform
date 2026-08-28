@@ -674,7 +674,14 @@ histogram（直方图）、scatter（散点图）、boxplot（箱线图）、lin
 
 **文件位置**：`backend/app/api/ai.py`、`backend/app/services/ai_service.py`
 
-基于 OpenAI 兼容 API（支持 DeepSeek 等）提供智能对话能力，核心特色为**上下文注入**（将数据产物摘要和操作记录注入对话，辅助 AI 分析）。
+基于 OpenAI 兼容 API（支持 DeepSeek 等）提供智能对话能力，核心特色为**上下文注入**（将数据产物摘要和操作记录注入对话，辅助 AI 分析）。前端 `AIAnalysis.vue` 顶部提供两种模式，互不串用：
+
+| 模式 | `module_type` | 定位 |
+|------|--------------|------|
+| **分析对话** | `general_chat` | 注入上下文（真实数据产物/操作记录），AI 基于实际数据分析 |
+| **产品问答** | `ai_qa` | 面向"数据仓库"（勾选数据集或常驻目录）精确问答与预测 |
+
+**模式隔离**：切换模式会清空已选上下文、输入框中未发送内容、当前会话与产品问答常驻目录选中态（`qaSelectedCatalogId`），避免两个模式数据串用。
 
 > **重要变更**：AI 模块已重构为上下文注入对话模式。旧的 `/query`、`/insights`、`/report`、`/metadata`、`/auto-insight`、`/trend-prediction`、`/anomaly-explanation`、`/recommend-steps`、`/follow-up` 路由及整组"AI 方案管理"（`/plans/*`）均已删除。AI 模块的 raw-data/upload 现复用 `/api/datasets/*` 接口。
 
@@ -698,6 +705,15 @@ histogram（直方图）、scatter（散点图）、boxplot（箱线图）、lin
 - 用户选中的上下文项持久化于 `ai_conversation_contexts` 表（item_type: dataset/operation）
 - 超出滑动窗口的旧消息可压缩为摘要存储于会话 `summary` 字段
 - 每次对话记录 Token 使用量到 AIUsageLog 表
+
+**历史会话上下文恢复**：
+- 会话详情接口（`GET /api/ai/conversations/{id}`）返回 `module_type`（用于前端自动切换模式）和 `last_context_items`（上次上下文快照，`AIConversationDetail` schema）
+- 后端 `_build_context_snapshot` 依据 `type`/`ref_id` 从数据库补全上下文快照的 `label`/`artifact_type`/`artifact_label` 展示字段（type: dataset/operation）
+- 前端 `AIAnalysis.vue` 打开历史会话时按 `module_type`（`ai_qa`→产品问答，其余→分析对话）自动切换模式并恢复 `selectedContextItems`；`enrichRestoredContext` 对空 `label` 做兜底补全（数据集回填名称、任务显示 `任务#id`）
+
+**上下文状态实时校验**：
+- 后端 `_enrich_context_status` 对历史会话上下文快照做实时状态校验并返回前端；数据集已回收/删除/文件损坏时标注 `status` + `status_label`（如"已移至回收站""已彻底删除"），任务记录缺失标注"任务记录已不存在"
+- 前端在上下文芯片中用红色文字标注非 active 状态项，并在打开历史会话时弹窗提示受影响项数量，可手动移除
 
 **时间戳规范**：
 - 会话标题时间戳后端用 `shanghai_now()` 生成（上海时区）

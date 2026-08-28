@@ -14,7 +14,7 @@
       <!-- 上端：上下文注入区（可折叠，展开时显示分类列表） -->
       <div class="context-panel card" :class="{ collapsed: !contextPanelExpanded }">
         <div class="card-header">
-          <span class="card-title">上下文注入</span>
+          <span class="card-title">{{ qaMode ? '数据仓库选择' : '上下文注入' }}</span>
           <div class="flex-center gap-sm">
             <el-tooltip content="使用统计" placement="bottom" effect="dark">
               <el-button text size="small" circle @click="showStatsDialog = true" aria-label="使用统计">
@@ -54,6 +54,7 @@
                 @close="removeSelectedItem(item)"
               >
                 {{ item.label }}
+                <span v-if="item.status && item.status !== 'active'" style="color:#f56c6c;font-weight:600;margin-left:4px;">{{ item.status_label || '已删除' }}</span>
               </el-tag>
             </div>
             <el-button text size="small" class="summary-clear" @click="clearSelection">清空</el-button>
@@ -75,17 +76,17 @@
                 <el-icon><Search /></el-icon>
               </template>
             </el-input>
-            <el-select v-model="contextTypeFilter" size="small" class="filter-select">
+            <el-select v-model="contextTypeFilter" size="small" class="filter-select" v-if="!qaMode">
               <el-option label="全部类型" value="all" />
               <el-option label="数据产物" value="datasets" />
               <el-option label="操作记录" value="tasks" />
             </el-select>
-            <el-select v-model="contextStatusFilter" size="small" class="filter-select">
+            <el-select v-model="contextStatusFilter" size="small" class="filter-select" v-if="!qaMode">
               <el-option label="全部状态" value="all" />
               <el-option label="成功" value="success" />
               <el-option label="失败" value="failed" />
             </el-select>
-            <el-select v-model="contextTaskTypeFilter" size="small" class="filter-select" @change="onContextTaskFilterChange">
+            <el-select v-model="contextTaskTypeFilter" size="small" class="filter-select" v-if="!qaMode" @change="onContextTaskFilterChange">
               <el-option label="全部模块" value="" />
               <el-option label="数据清洗" value="cleaning" />
               <el-option label="数据分析" value="data_analysis" />
@@ -93,7 +94,7 @@
               <el-option label="特征工程" value="feature_engineering" />
               <el-option label="机器学习" value="ml" />
             </el-select>
-            <el-select v-model="contextTaskSourceFilter" size="small" class="filter-select" @change="onContextTaskFilterChange">
+            <el-select v-model="contextTaskSourceFilter" size="small" class="filter-select" v-if="!qaMode" @change="onContextTaskFilterChange">
               <el-option label="全部来源" value="" />
               <el-option label="本地数据" value="local" />
               <el-option label="远程数据库" value="remote" />
@@ -106,6 +107,64 @@
             >
               清空选择
             </el-button>
+          </div>
+
+          <!-- 问答模式：常驻目录 + 一键全选工具条 -->
+          <div v-if="qaMode" class="qa-catalog-bar">
+            <el-select
+              v-model="qaSelectedCatalogId"
+              placeholder="选择常驻目录（可选）"
+              size="small"
+              clearable
+              filterable
+              class="qa-catalog-select"
+              :loading="loadingQaCatalogs"
+              @change="applyQaCatalog"
+            >
+              <el-option
+                v-for="cat in qaCatalogs"
+                :key="cat.id"
+                :label="cat.name"
+                :value="cat.id"
+              >
+                <div class="qa-catalog-option">
+                  <span class="qa-catalog-name">{{ cat.name }}</span>
+                  <span class="qa-catalog-count">{{ cat.dataset_ids.length }} 个数据集</span>
+                </div>
+              </el-option>
+            </el-select>
+            <el-tooltip content="将当前选择的数据产物保存为常驻目录，下次一键复用" placement="top" effect="dark">
+              <el-button
+                size="small"
+                @click="openSaveCatalogDialog"
+                :disabled="selectedDatasetsCount === 0"
+              >
+                <el-icon style="margin-right:4px;"><Files /></el-icon>
+                保存为目录
+              </el-button>
+            </el-tooltip>
+            <el-button
+              size="small"
+              type="danger"
+              plain
+              @click="deleteCatalogHandler"
+              :disabled="!qaSelectedCatalogId"
+            >
+              删除目录
+            </el-button>
+            <span class="qa-bar-divider"></span>
+            <el-tooltip content="将全部数据产物选入数据仓库（合成小型数据仓库供 AI 查询）" placement="top" effect="dark">
+              <el-button
+                size="small"
+                type="primary"
+                plain
+                @click="selectAllDatasets"
+                :disabled="allDatasets.length === 0"
+              >
+                <el-icon style="margin-right:4px;"><Select /></el-icon>
+                一键全选
+              </el-button>
+            </el-tooltip>
           </div>
 
           <!-- 列表区（可上下滚动，搜索栏固定不动） -->
@@ -160,15 +219,17 @@
                             :key="`dataset-${ds.id}`"
                             class="context-item"
                             :class="{ selected: isItemSelected('dataset', ds.id) }"
-                            @click="toggleSelect('dataset', ds.id, ds.name, ds.artifact_type, ds.artifact_label)"
+                            @click="toggleSelect('dataset', ds.id, `${ds.name} (ID:${ds.id})`, ds.artifact_type, ds.artifact_label)"
                           >
                             <el-checkbox
                               :model-value="isItemSelected('dataset', ds.id)"
                               @click.stop
-                              @change="toggleSelect('dataset', ds.id, ds.name, ds.artifact_type, ds.artifact_label)"
+                              @change="toggleSelect('dataset', ds.id, `${ds.name} (ID:${ds.id})`, ds.artifact_type, ds.artifact_label)"
                             />
                             <div class="item-info">
-                              <div class="item-name" :title="ds.name">{{ ds.name }}</div>
+                              <div class="item-name" :title="`${ds.name} | ID:${ds.id}`">
+                                <span class="item-name-text">{{ ds.name }} | ID:{{ ds.id }}</span>
+                              </div>
                               <div class="item-meta">
                                 <el-tag size="small" effect="plain" :type="getArtifactTagType(ds.artifact_type)">
                                   {{ ds.artifact_label || ds.artifact_type }}
@@ -194,8 +255,8 @@
                 </div>
               </div>
 
-              <!-- 操作记录区（类型筛选非 datasets 时显示） -->
-              <div v-if="contextTypeFilter !== 'datasets'" class="context-section">
+              <!-- 操作记录区（类型筛选非 datasets 时显示；问答模式不显示操作） -->
+              <div v-if="!qaMode && contextTypeFilter !== 'datasets'" class="context-section">
                 <div class="section-header">
                   <span class="section-title">操作记录</span>
                   <el-tag size="small" type="info" effect="plain">{{ filteredTasks.length }}</el-tag>
@@ -294,7 +355,19 @@
       <!-- 下端：对话区（撑满剩余高度） -->
       <div class="chat-panel card">
         <div class="card-header">
-          <span class="card-title">AI 智能对话</span>
+          <!-- 模式切换 Tab -->
+          <div class="mode-tabs">
+            <el-tooltip content="结合上下文注入，进行流程推荐、问题诊断等开放性分析" placement="bottom" effect="dark">
+              <button class="mode-tab" :class="{ active: !qaMode }" @click="switchMode('chat')">
+                <ChatDotRound />分析对话
+              </button>
+            </el-tooltip>
+            <el-tooltip content="基于数据仓库精确问答与预测，例如：去年平均月薪是多少、预测下一年产量" placement="bottom" effect="dark">
+              <button class="mode-tab" :class="{ active: qaMode }" @click="switchMode('qa')">
+                <DataAnalysis />产品问答
+              </button>
+            </el-tooltip>
+          </div>
           <div class="flex-center gap-sm">
             <el-button
               v-if="currentConversationId && messages.length > 0"
@@ -317,8 +390,15 @@
         <div class="chat-messages" ref="chatMessages">
           <div v-if="messages.length === 0" class="chat-empty">
             <div class="empty-icon"><el-icon :size="48"><QuestionFilled /></el-icon></div>
-            <div class="empty-text">开始与 AI 对话</div>
-            <div class="empty-hint">从上方上下文注入区选择数据产物或操作记录作为上下文，AI 将基于真实数据进行分析诊断</div>
+            <div class="empty-text">{{ qaMode ? '开始产品精确问答' : '开始与 AI 对话' }}</div>
+            <div class="empty-hint">
+              <template v-if="qaMode">
+                在"数据仓库选择"区勾选产物、一键全选或选择常驻目录，即可提问统计、筛选、趋势或预测，AI 将基于真实数据给出精确结果
+              </template>
+              <template v-else>
+                从上方上下文注入区选择数据产物或操作记录作为上下文，AI 将基于真实数据进行分析诊断
+              </template>
+            </div>
           </div>
 
           <div v-for="(msg, idx) in messages" :key="idx" class="chat-msg" :class="msg.role">
@@ -331,6 +411,106 @@
                 <span class="msg-time">{{ msg.time }}</span>
               </div>
               <div class="msg-body" v-html="renderMarkdown(msg.content)"></div>
+
+              <!-- 问答精确结果卡片（本地计算，非 LLM 生成，可核验） -->
+              <div v-if="msg.role === 'assistant' && hasExecResult(msg.execResult)" class="qa-result-card">
+                <div class="qa-result-head">
+                  <span class="qa-result-title">
+                    <el-icon><DataAnalysis /></el-icon>
+                    精确计算结果
+                  </span>
+                  <el-tag size="small" effect="plain" type="success">{{ execTypeLabel(msg.execResult) }}</el-tag>
+                  <el-tag v-if="msg.execResult.computed_by" size="small" effect="plain" type="info">
+                    {{ msg.execResult.computed_by === 'pandas' ? '本地精确计算' : '远程SQL下推' }}
+                  </el-tag>
+                </div>
+
+                <!-- 单值汇总（计数/均值等） -->
+                <div v-if="!isGroupedResult(msg.execResult) && !isPredictionResult(msg.execResult)" class="qa-result-single">
+                  <span class="qa-result-value">{{ execValue(msg.execResult) }}</span>
+                  <span v-if="msg.execResult.result.count !== undefined" class="qa-result-unit">条</span>
+                </div>
+
+                <!-- 分组聚合表格 -->
+                <el-table
+                  v-if="isGroupedResult(msg.execResult)"
+                  :data="msg.execResult.result.grouped"
+                  size="small"
+                  border
+                  max-height="220"
+                  class="qa-result-table"
+                >
+                  <el-table-column
+                    v-for="col in Object.keys(msg.execResult.result.grouped[0] || {})"
+                    :key="col"
+                    :prop="col"
+                    :label="col"
+                  />
+                </el-table>
+
+                <!-- 预测结果：总览 + 分布 + TOP 明细 -->
+                <div v-if="isPredictionResult(msg.execResult)" class="qa-result-prediction">
+                  <div class="qa-pred-overview">
+                    <div class="qa-pred-stat">
+                      <span class="qa-pred-label">预测总量</span>
+                      <span class="qa-pred-num">{{ msg.execResult.result.total }}</span>
+                    </div>
+                    <div v-if="predictionDistribution(msg.execResult)" class="qa-pred-bars">
+                      <div v-for="(val, key) in predictionDistribution(msg.execResult)" :key="key" class="qa-pred-bar-row">
+                        <span class="qa-pred-bar-label">{{ key }}</span>
+                        <div class="qa-pred-bar-track">
+                          <div class="qa-pred-bar-fill" :style="{ width: predBarPercent(val, msg.execResult) + '%' }"></div>
+                        </div>
+                        <span class="qa-pred-bar-val">{{ val }}</span>
+                      </div>
+                    </div>
+                  </div>
+                  <!-- 预测来源标注 -->
+                  <div v-if="msg.execResult.result.predict_source" class="qa-pred-source">预测来源：{{ msg.execResult.result.predict_source }}</div>
+                  <!-- 时间外推结果 -->
+                  <div v-if="msg.execResult.result.forecast" class="qa-pred-forecast">
+                    <el-alert
+                      v-if="msg.execResult.result.forecast.error"
+                      type="warning"
+                      :closable="false"
+                      show-icon
+                      :title="'时间外推已跳过：' + msg.execResult.result.forecast.error"
+                    />
+                    <template v-else>
+                      <div class="qa-pred-forecast-title">
+                        <span class="qa-pred-forecast-badge">外推</span>
+                        时间外推（{{ msg.execResult.result.forecast.method }}）
+                      </div>
+                      <div class="qa-pred-forecast-grid">
+                        <div class="qa-pred-forecast-item">
+                          <span class="qa-pred-forecast-label">最新周期（{{ msg.execResult.result.forecast.latest_time }}）</span>
+                          <span class="qa-pred-forecast-value">{{ msg.execResult.result.forecast.current_prediction }}</span>
+                        </div>
+                        <div class="qa-pred-forecast-item">
+                          <span class="qa-pred-forecast-label">下一周期（{{ msg.execResult.result.forecast.next_time }}）</span>
+                          <span class="qa-pred-forecast-value qa-pred-forecast-next">{{ msg.execResult.result.forecast.next_prediction }}</span>
+                        </div>
+                      </div>
+                    </template>
+                  </div>
+                  <div v-if="msg.execResult.result.sample_rows && msg.execResult.result.sample_rows.length" class="qa-pred-samples-label">预测明细（前 {{ msg.execResult.result.sample_rows.length }} 条）</div>
+                  <el-table
+                    v-if="msg.execResult.result.sample_rows && msg.execResult.result.sample_rows.length"
+                    :data="msg.execResult.result.sample_rows"
+                    size="small"
+                    border
+                    max-height="220"
+                    class="qa-result-table"
+                  >
+                    <el-table-column
+                      v-for="col in Object.keys(msg.execResult.result.sample_rows[0] || {})"
+                      :key="col"
+                      :prop="col"
+                      :label="col"
+                    />
+                  </el-table>
+                </div>
+              </div>
 
               <!-- 上下文标记展示 -->
               <div v-if="msg.role === 'assistant' && msg.contextItems && msg.contextItems.length > 0" class="msg-context-tags">
@@ -419,7 +599,7 @@
           <!-- Tab 1: 快捷模板（始终可用） -->
           <div v-if="activeFollowupTab === 'templates'" class="followup-list">
             <el-button
-              v-for="cmd in quickCommands"
+              v-for="cmd in displayQuickCommands"
               :key="cmd"
               size="small"
               round
@@ -450,16 +630,29 @@
 
         <div class="chat-input-area">
           <div v-if="selectedContextItems.length > 0" class="context-badge">
-            <el-icon><Link /></el-icon>
-            <span>本次对话将注入 {{ selectedContextItems.length }} 个上下文项</span>
-            <el-button
-              text
-              size="small"
-              class="badge-clear-btn"
-              @click="clearSelection"
-            >
-              清空选择
-            </el-button>
+            <div class="context-badge-head">
+              <el-icon><Link /></el-icon>
+              <span>本次对话将注入 {{ selectedContextItems.length }} 个上下文项</span>
+              <el-button text size="small" class="badge-clear-btn" @click="clearSelection">
+                清空选择
+              </el-button>
+            </div>
+            <!-- 已选上下文项 chips：直接在此可逐个取消，不用到上方面板查找 -->
+            <div class="context-badge-chips">
+              <el-tag
+                v-for="item in selectedContextItems"
+                :key="`badge-${item.type}-${item.ref_id}`"
+                size="small"
+                effect="plain"
+                :type="getItemTagType(item)"
+                closable
+                @close="removeSelectedItem(item)"
+              >
+                {{ item.label }}
+                <span v-if="item.auto_source_dataset_id" class="badge-auto-mark">· 血缘</span>
+                <span v-if="item.status && item.status !== 'active'" style="color:#f56c6c;font-weight:600;margin-left:4px;">{{ item.status_label || '已删除' }}</span>
+              </el-tag>
+            </div>
           </div>
           <el-input
             ref="questionInput"
@@ -570,6 +763,25 @@
       </template>
     </el-dialog>
 
+    <!-- 保存问答常驻目录弹窗 -->
+    <el-dialog v-model="showSaveCatalogDialog" title="保存为常驻目录" width="460px" aria-label="保存常驻目录弹窗">
+      <el-form label-width="80px">
+        <el-form-item label="目录名称" required>
+          <el-input v-model="qaCatalogName" placeholder="为这批数据产物集合命名" maxlength="60" show-word-limit />
+        </el-form-item>
+        <el-form-item label="描述">
+          <el-input v-model="qaCatalogDesc" type="textarea" :rows="2" placeholder="可选，说明该目录用途" maxlength="200" show-word-limit />
+        </el-form-item>
+        <el-form-item label="数据集">
+          <span class="catalog-count-tip">已含 {{ selectedDatasetsCount }} 个数据产物{{ qaSelectedCatalogId ? '（将更新当前所选目录）' : '' }}</span>
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button @click="showSaveCatalogDialog = false">取消</el-button>
+        <el-button type="primary" @click="confirmSaveCatalog" :disabled="selectedDatasetsCount === 0">保存</el-button>
+      </template>
+    </el-dialog>
+
     <!-- 使用统计弹窗 -->
     <el-dialog v-model="showStatsDialog" title="使用统计" width="480px" aria-label="使用统计弹窗">
       <div v-if="loadingStats" class="loading-container">
@@ -612,12 +824,13 @@ import {
   View, InfoFilled,
   Refresh, ArrowRight, ArrowDown, ArrowUp, Close, Link,
   Brush, DataAnalysis, Cpu, MagicStick, Files,
-  Search, Edit
+  Search, Edit, Select
 } from '@element-plus/icons-vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import {
   aiChat,
-  fetchContextOptions, previewContextItem,
+  fetchContextOptions, previewContextItem, fetchBloodlineOps,
+  qaChat, listQaCatalogs, saveQaCatalog, deleteQaCatalog,
   getAIConfig,
   fetchConversations, fetchConversation, deleteConversation, renameConversation,
   fetchUsageStats,
@@ -693,17 +906,46 @@ const showStatsDialog = ref(false)
 const loadingStats = ref(false)
 const usageStats = ref({})
 
+// ========== 产品问答模式状态 ==========
+// 模式：'chat' 分析对话（原有智能对话）| 'qa' 产品问答（数据仓库精确问答/预测）
+const activeMode = ref('chat')
+const qaMode = computed(() => activeMode.value === 'qa')
+const qaCatalogs = ref([])               // 常驻目录列表 [{id, name, description, dataset_ids, is_default}]
+const qaSelectedCatalogId = ref(null)    // 当前选中的常驻目录ID
+const loadingQaCatalogs = ref(false)
+const showSaveCatalogDialog = ref(false) // 保存常驻目录弹窗
+const qaCatalogName = ref('')            // 保存目录名称
+const qaCatalogDesc = ref('')            // 保存目录描述
+
+// 问答模式下已选数据产物数量（常驻目录保存/全选按钮禁用判断用）
+const selectedDatasetsCount = computed(() =>
+  selectedContextItems.value.filter(i => i.type === 'dataset').length
+)
+
 // ========== 标签映射 ==========
 // 模块名、产物类型名、任务类型名优先使用后端返回的 *_label 字段
 // 标签映射函数统一复用 utils/labels.js，避免本地维护重复映射
 
-// 快捷命令（空会话时展示的模板）
+// 快捷命令（空会话时展示的模板）——分析对话与产品问答使用不同模板集
 const quickCommands = [
   '分析这份数据的核心特征',
   '数据质量是否存在问题？',
   '模型准确率为什么偏低？',
   '给出改进建议'
 ]
+
+// 产品问答模式的专属快捷模板：面向数据仓库精确统计/筛选/分组/预测场景
+const qaQuickCommands = [
+  '这个数据集共有多少条记录？',
+  '按某一列分组统计各组的数量',
+  '预测下一周期的目标值',
+  '各列的类型和缺失情况如何？'
+]
+
+// 根据当前模式返回对应的快捷模板列表
+const displayQuickCommands = computed(() =>
+  qaMode.value ? qaQuickCommands : quickCommands
+)
 
 // ========== 追问建议状态 ==========
 // AI 回答后生成的追问建议列表（来自后端 suggested_questions 字段）
@@ -727,6 +969,11 @@ const filteredConversations = computed(() => {
 })
 
 const inputPlaceholder = computed(() => {
+  if (qaMode.value) {
+    return selectedDatasetsCount.value > 0
+      ? `基于 ${selectedDatasetsCount.value} 个数据产物，询问统计、筛选、趋势或预测（如：去年平均月薪是多少？预测下一年产量）...`
+      : '请先选择数据产物（可一键全选或选择常驻目录），再输入问题...'
+  }
   if (selectedContextItems.value.length > 0) {
     return `基于 ${selectedContextItems.value.length} 个上下文项，输入您的问题...`
   }
@@ -966,7 +1213,8 @@ onMounted(async () => {
   await checkConfigStatus()
   await Promise.all([
     loadConversations(),
-    loadContextOptions()
+    loadContextOptions(),
+    loadQaCatalogs()
   ])
 })
 
@@ -985,7 +1233,8 @@ onActivated(async () => {
     await checkConfigStatus()
     await Promise.all([
       loadConversations(),
-      loadContextOptions()
+      loadContextOptions(),
+      loadQaCatalogs()
     ])
   } else {
     // 同一用户：仅刷新上下文选项，反映数据集状态变化（如删除/恢复）
@@ -1155,11 +1404,20 @@ function isItemSelected(type, refId) {
 }
 
 function toggleSelect(type, refId, label, artifactType, artifactLabel) {
-  const idx = selectedContextItems.value.findIndex(
+  const existing = selectedContextItems.value.some(
     item => item.type === type && item.ref_id === refId
   )
-  if (idx >= 0) {
-    selectedContextItems.value.splice(idx, 1)
+  if (existing) {
+    // 取消选中：从已选项中移除该上下文项
+    selectedContextItems.value = selectedContextItems.value.filter(
+      item => !(item.type === type && item.ref_id === refId)
+    )
+    // 取消选中数据产物时，一并移除由它自动带出的血缘操作（保留用户手动添加的操作）
+    if (type === 'dataset') {
+      selectedContextItems.value = selectedContextItems.value.filter(
+        item => item.auto_source_dataset_id !== refId
+      )
+    }
   } else {
     selectedContextItems.value.push({
       type,
@@ -1168,6 +1426,42 @@ function toggleSelect(type, refId, label, artifactType, artifactLabel) {
       artifact_type: artifactType || '',
       artifact_label: artifactLabel || ''
     })
+    // 选中数据产物时，自动带出它血缘链上的操作（默认选中、标注所属产物、可在已选项中取消）
+    if (type === 'dataset') {
+      autoInjectBloodlineOps(refId)
+    }
+  }
+}
+
+// 选中数据产物后，自动带出它血缘链上的最近操作记录（默认选中，可取消）
+async function autoInjectBloodlineOps(datasetId) {
+  try {
+    const res = await fetchBloodlineOps(datasetId)
+    const ops = res.data?.operations || []
+    let addedCount = 0
+    for (const op of ops) {
+      const exists = selectedContextItems.value.some(
+        item => item.type === 'operation' && item.ref_id === op.id
+      )
+      if (exists) continue
+      // 标注操作所属的产物，便于区分同名产物
+      const opTypeLabel = op.task_type_label || op.task_type || 'unknown'
+      const belongs = op.belongs_to ? ` · ${op.belongs_to}` : ''
+      selectedContextItems.value.push({
+        type: 'operation',
+        ref_id: op.id,
+        label: `任务#${op.id}(${opTypeLabel})${belongs}`,
+        artifact_type: op.task_type || 'unknown',
+        artifact_label: opTypeLabel,
+        auto_source_dataset_id: datasetId
+      })
+      addedCount++
+    }
+    if (addedCount > 0) {
+      ElMessage.info(`已按数据血缘自动带出 ${addedCount} 条操作，可在已选项中取消`)
+    }
+  } catch (e) {
+    console.error('自动带出血缘操作失败:', e)
   }
 }
 
@@ -1182,6 +1476,208 @@ function removeSelectedItem(item) {
 
 function clearSelection() {
   selectedContextItems.value = []
+}
+
+// ========== 产品问答模式方法 ==========
+
+// 切换问答/分析模式：重置跨模式残留的对话与上下文状态，避免串数据
+function switchMode(mode) {
+  if (activeMode.value === mode) return
+  activeMode.value = mode
+  // 切换模式时清空当前对话、上下文选择与追问建议
+  stopThinkingAnimation()
+  aiThinking.value = false
+  messages.value = []
+  question.value = ''               // 切换模式时清空输入框中尚未发送的内容
+  currentConversationId.value = null
+  startNewTopicFlag.value = false
+  selectedContextItems.value = []
+  suggestedQuestions.value = []
+  activeFollowupTab.value = 'templates'
+  contextPanelExpanded.value = false
+  // 产品问答特有条目的常驻目录选中态一并清空，避免切换模式后残留
+  qaSelectedCatalogId.value = null
+}
+
+// 一键全选：将当前加载的全部数据产物选入数据仓库（仅数据产物，不含操作记录）
+function selectAllDatasets() {
+  const currentDatasets = filteredDatasets.value
+  if (currentDatasets.length === 0) return
+  // 清空旧选择，再全部加入，避免与已有手动选择重复
+  selectedContextItems.value = selectedContextItems.value.filter(i => i.type !== 'dataset')
+  for (const ds of currentDatasets) {
+    if (!selectedContextItems.value.some(i => i.type === 'dataset' && i.ref_id === ds.id)) {
+      selectedContextItems.value.push({
+        type: 'dataset',
+        ref_id: ds.id,
+        label: `${ds.name} (ID:${ds.id})`,
+        artifact_type: ds.artifact_type,
+        artifact_label: ds.artifact_label
+      })
+    }
+  }
+  ElMessage.success(`已将 ${currentDatasets.length} 个数据产物选入数据仓库`)
+}
+
+// 加载当前用户的常驻目录列表
+async function loadQaCatalogs() {
+  loadingQaCatalogs.value = true
+  try {
+    const res = await listQaCatalogs()
+    qaCatalogs.value = res.data || []
+  } catch (e) {
+    console.error('加载常驻目录失败:', e)
+    qaCatalogs.value = []
+  } finally {
+    loadingQaCatalogs.value = false
+  }
+}
+
+// 选中常驻目录后，将其中数据集作为数据仓库
+function applyQaCatalog(catId) {
+  if (!catId) return
+  const cat = qaCatalogs.value.find(c => c.id === catId)
+  if (!cat) return
+  // 清除旧的已选数据产物，装载目录的集合
+  selectedContextItems.value = []
+  const idSet = new Set(cat.dataset_ids)
+  for (const ds of allDatasets.value) {
+    if (idSet.has(ds.id)) {
+      selectedContextItems.value.push({
+        type: 'dataset',
+        ref_id: ds.id,
+        label: `${ds.name} (ID:${ds.id})`,
+        artifact_type: ds.artifact_type,
+        artifact_label: ds.artifact_label
+      })
+    }
+  }
+  ElMessage.success(`已装载常驻目录"${cat.name}"（${selectedContextItems.value.length} 个数据产物）`)
+}
+
+// 打开"保存为目录"弹窗
+function openSaveCatalogDialog() {
+  qaCatalogName.value = ''
+  qaCatalogDesc.value = ''
+  showSaveCatalogDialog.value = true
+}
+
+// 确认保存常驻目录
+async function confirmSaveCatalog() {
+  if (!qaCatalogName.value.trim()) {
+    ElMessage.warning('请输入目录名称')
+    return
+  }
+  const ids = getSelectedDatasetIds()
+  if (ids.length === 0) {
+    ElMessage.warning('请先选择数据产物')
+    return
+  }
+  // 若已选中某目录则视为更新该目录
+  const catalogId = qaSelectedCatalogId.value || undefined
+  try {
+    await saveQaCatalog({
+      name: qaCatalogName.value.trim(),
+      dataset_ids: ids,
+      description: qaCatalogDesc.value.trim() || undefined,
+      catalog_id: catalogId
+    })
+    ElMessage.success(catalogId ? '目录已更新' : '目录已保存')
+    showSaveCatalogDialog.value = false
+    await loadQaCatalogs()
+  } catch (e) {
+    const msg = e.response?.data?.detail || '保存目录失败'
+    ElMessage.error(typeof msg === 'string' ? msg : JSON.stringify(msg))
+  }
+}
+
+// 删除常驻目录
+async function deleteCatalogHandler() {
+  const catId = qaSelectedCatalogId.value
+  if (!catId) return
+  try {
+    await ElMessageBox.confirm('确定删除该常驻目录吗？此操作不影响数据本身。', '确认删除', {
+      type: 'warning',
+      confirmButtonText: '删除',
+      cancelButtonText: '取消'
+    })
+  } catch {
+    return
+  }
+  try {
+    await deleteQaCatalog(catId)
+    qaSelectedCatalogId.value = null
+    ElMessage.success('目录已删除')
+    await loadQaCatalogs()
+  } catch (e) {
+    ElMessage.error(e.response?.data?.detail || '删除目录失败')
+  }
+}
+
+// ========== 问答精确结果渲染辅助 ==========
+
+// 判断 exec_result 是否可渲染成本地结果卡片
+function hasExecResult(execResult) {
+  if (!execResult || !execResult.success) return false
+  const r = execResult.result
+  return !!r && (r.count !== undefined || r.grouped !== undefined ||
+    r.total !== undefined || r.top_predictions !== undefined ||
+    (r[`${execResult.aggregation || 'mean'}_${execResult.target_column || ''}`] !== undefined))
+}
+
+// 渲染 exec_result 单值数值：优先取 result 中除 grouped 外的数值键
+function execValue(execResult) {
+  const r = (execResult && execResult.result) || {}
+  return r.count !== undefined ? r.count : Object.values(r)[0]
+}
+
+// 执行类型标签（聚合/明细/预测），用于结果卡片角标
+function execTypeLabel(execResult) {
+  if (!execResult) return ''
+  const t = execResult.result_type
+  if (execResult.needs_model || t === 'prediction') return '预测结果'
+  if (t === 'rows') return '数据明细'
+  return '聚合结果'
+}
+
+// 判断是否为分组聚合（有 grouped 字段）
+function isGroupedResult(execResult) {
+  return !!(execResult && execResult.success && execResult.result && execResult.result.grouped)
+}
+
+// 判断是否为模型预测结果（分类 top_predictions / 回归 prediction_stats 均算）
+function isPredictionResult(execResult) {
+  if (!execResult || !execResult.success) return false
+  if (execResult.result_type === 'prediction') return true
+  const r = execResult.result
+  return !!(r && (r.top_predictions || r.prediction_stats))
+}
+
+// 预测分布对象（k:v），用于缩放条展示
+// 分类：top_predictions=[{value,count}]；回归：prediction_stats={min,max,mean}
+function predictionDistribution(execResult) {
+  const r = execResult?.result
+  if (!r) return null
+  if (!r.top_predictions) {
+    const stats = r.prediction_stats || {}
+    if (stats && typeof stats === 'object' && Object.keys(stats).length > 0) return stats
+    return null
+  }
+  // 转为 {value: count}，供分布条渲染
+  const dist = {}
+  for (const item of r.top_predictions) {
+    if (item && item.value !== undefined) dist[item.value] = item.count
+  }
+  return Object.keys(dist).length ? dist : null
+}
+
+// 计算预测分布中各分类的占比（用于缩放条宽度，0-100）
+function predBarPercent(value, execResult) {
+  const dist = predictionDistribution(execResult)
+  if (!dist) return 0
+  const max = Math.max(...Object.values(dist))
+  if (!max) return 0
+  return Math.round((Number(value) / max) * 100)
 }
 
 async function previewItem(type, refId, name) {
@@ -1348,12 +1844,22 @@ function useQuickCommand(cmd) {
   question.value = cmd
 }
 
+// 问答模式下：仅取已选数据产物ID作为数据仓库
+const getSelectedDatasetIds = () =>
+  selectedContextItems.value.filter(i => i.type === 'dataset').map(i => i.ref_id)
+
 async function sendMessage() {
   const q = question.value.trim()
   if (!q || aiThinking.value) return
 
   if (!configStatus.value) {
     ElMessage.warning('AI 服务不可用，请联系管理员配置 API Key')
+    return
+  }
+
+  // 问答模式下未选数据产物则拦截
+  if (qaMode.value && getSelectedDatasetIds().length === 0) {
+    ElMessage.warning('请先在"数据仓库选择"区域勾选数据产物、一键全选或选择常驻目录')
     return
   }
 
@@ -1379,7 +1885,18 @@ async function sendMessage() {
     }))
 
     // startNewTopicFlag 为 true 时通知后端开启新话题，断开与历史对话的关联
-    const res = await aiChat(q, contextItemsParam, currentConversationId.value, null, startNewTopicFlag.value)
+    let res
+    if (qaMode.value) {
+      // 产品问答：走数据仓库精确问答/预测接口，只传数据产物ID集合
+      res = await qaChat(q, getSelectedDatasetIds(), currentConversationId.value, startNewTopicFlag.value)
+    } else {
+      // 分析对话：构造 context_items 参数（仅传 type 和 ref_id）
+      const contextItemsParam = contextSnapshot.map(item => ({
+        type: item.type,
+        ref_id: item.ref_id
+      }))
+      res = await aiChat(q, contextItemsParam, currentConversationId.value, null, startNewTopicFlag.value)
+    }
     // 发送后无论成功失败都重置新话题标记
     startNewTopicFlag.value = false
     const reply = res.data?.answer
@@ -1387,6 +1904,7 @@ async function sendMessage() {
     const needsContext = res.data?.needs_context || []
     const isFallback = res.data?.usage?.is_fallback || false
     const suggestedQuestionsList = res.data?.suggested_questions || []
+    const execResult = res.data?.exec_result || null
 
     if (res.data?.conversation_id) {
       currentConversationId.value = res.data.conversation_id
@@ -1407,16 +1925,27 @@ async function sendMessage() {
       time: _formatShanghai(new Date()),
       usage: usage,
       is_fallback: isFallback,
-      needsContext: needsContext
+      needsContext: needsContext,
+      // 问答模式附带精确计算结果（前端可选渲染为表格/结构化卡片）
+      execResult: qaMode.value ? execResult : null
     })
     await loadConversations()
   } catch (e) {
     // 异常时也重置新话题标记，避免状态残留
     startNewTopicFlag.value = false
     console.error(e)
+    // 尽量透出后端的明确错误原因（如"追问次数已用完""会话已过期"），
+    // 只有拿不到明确信息时才回退到通用兜底文案，避免误导用户以为服务不可用
+    const detail = e?.response?.data?.detail ?? e?.response?.data?.error
+    let errText = '抱歉，AI 服务暂时不可用，请检查网络连接或稍后重试。'
+    if (detail) {
+      errText = Array.isArray(detail)
+        ? detail.map(d => d?.msg || d).join('；')
+        : String(detail)
+    }
     messages.value.push({
       role: 'assistant',
-      content: '抱歉，AI 服务暂时不可用，请检查网络连接或稍后重试。',
+      content: errText,
       time: _formatShanghai(new Date())
     })
   } finally {
@@ -1493,6 +2022,26 @@ async function checkConfigStatus() {
 
 // ========== 会话管理 ==========
 
+// 恢复历史会话上下文时，对后端快照缺 label/展示字段的记录做兜底补全，
+// 避免出现"含叉但内容空白"的空白 chip（兼容旧会话的残缺快照）
+function enrichRestoredContext(items) {
+  return items.map(it => {
+    const item = { ...it }
+    if (item.label && String(item.label).trim()) return item
+    if (item.type === 'dataset') {
+      const ds = allDatasets.value.find(d => d.id === item.ref_id)
+      if (ds) {
+        item.label = `${ds.name} (ID:${ds.id})`
+        item.artifact_type = ds.artifact_type || ''
+        item.artifact_label = ds.artifact_label || ds.artifact_type || ''
+      }
+    } else {
+      item.label = `任务#${item.ref_id}`
+    }
+    return item
+  })
+}
+
 async function loadConversations() {
   loadingConversations.value = true
   try {
@@ -1510,6 +2059,12 @@ async function loadConversation(conv) {
     const res = await fetchConversation(conv.id)
     const data = res.data || {}
     const msgs = data.conversation || data.messages || []
+    // 根据会话类型切换到对应模式（ai_qa=产品问答，其余=分析对话），
+    // 避免从历史打开产品问答时仍停留在分析对话模式
+    const targetMode = data.module_type === 'ai_qa' ? 'qa' : 'chat'
+    activeMode.value = targetMode
+    stopThinkingAnimation()
+    aiThinking.value = false
     messages.value = msgs.map(m => ({
       role: m.role,
       content: m.content,
@@ -1517,11 +2072,25 @@ async function loadConversation(conv) {
       usage: m.usage || 0
     }))
     currentConversationId.value = conv.id
-    // 切换会话时清空追问建议、已选上下文项并重置 Tab，避免跨会话串数据
-    selectedContextItems.value = []
+    startNewTopicFlag.value = false
+    // 恢复上一次的上下文（所选数据产物/操作记录），缺失则置空避免串数据
+    selectedContextItems.value = Array.isArray(data.last_context_items)
+      ? enrichRestoredContext(data.last_context_items)
+      : []
+    // 若会话上下文中有已删除/已回收的数据或任务，提醒用户注意
+    const goneCount = selectedContextItems.value.filter(
+      i => i.status && i.status !== 'active'
+    ).length
+    if (goneCount > 0) {
+      ElMessage.warning(`该会话中有 ${goneCount} 项数据/任务已删除或放入回收站，已在上下文中标注提醒，可手动移除`)
+    }
+    // 恢复上下文后不再沿用常驻目录选中态
+    qaSelectedCatalogId.value = null
+    // 切换会话时清空追问建议、重置 Tab，避免跨会话串数据
     suggestedQuestions.value = []
     activeFollowupTab.value = 'templates'
     showHistoryDialog.value = false
+    contextPanelExpanded.value = false
     ElMessage.success('已加载历史会话')
   } catch (e) {
     // 加载失败：保留当前消息列表，提示错误且不关闭弹窗，
@@ -1612,7 +2181,8 @@ function getModuleIcon(type) {
     feature_engineering: 'MagicStick',
     machine_learning: 'Cpu',
     comprehensive: 'DataLine',
-    general_chat: 'ChatDotRound'
+    general_chat: 'ChatDotRound',
+    ai_qa: 'ChatLineRound' // 产品问答会话
   }
   return iconMap[type] || 'Document'
 }
@@ -2141,8 +2711,8 @@ function formatDateTime(timeStr) {
 .quick-commands {
   display: flex;
   flex-direction: column;
-  gap: 8px;
-  padding: 0 16px 8px;
+  gap: 4px;
+  padding: 0 14px 6px;
   border-top: 1px solid var(--border-light, #f0f0f0);
   flex-shrink: 0;
 }
@@ -2151,7 +2721,7 @@ function formatDateTime(timeStr) {
 .followup-tabs {
   display: flex;
   gap: 4px;
-  padding-bottom: 6px;
+  padding-bottom: 2px;
   border-bottom: 1px solid var(--border-light, #f0f0f0);
 }
 
@@ -2205,8 +2775,8 @@ function formatDateTime(timeStr) {
   align-items: center;
   gap: 8px;
   flex-wrap: wrap;
-  padding-top: 6px;
-  min-height: 32px;
+  padding-top: 4px;
+  min-height: 28px;
 }
 
 .followup-empty {
@@ -2227,14 +2797,33 @@ function formatDateTime(timeStr) {
 
 .context-badge {
   display: flex;
-  align-items: center;
+  flex-direction: column;
   gap: 6px;
   font-size: 12px;
   color: var(--primary, #4361ee);
   margin-bottom: 8px;
-  padding: 4px 8px;
+  padding: 6px 8px;
   background: var(--primary-light, #eff6ff);
   border-radius: 4px;
+}
+
+.context-badge-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+/* 已选项 chips 横排，可换行；每个可单独点 × 取消，避免到上方面板查找 */
+.context-badge-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+/* 血缘自动带出操作的标记 */
+.context-badge-chips .badge-auto-mark {
+  font-weight: 600;
+  opacity: 0.85;
 }
 
 /* 提示条内的清空按钮：靠右，减少内边距避免过高 */
@@ -2435,6 +3024,9 @@ function formatDateTime(timeStr) {
 .conv-icon.icon-comprehensive {
   background: linear-gradient(135deg, #f87171, #ef4444);
 }
+.conv-icon.icon-ai_qa {
+  background: linear-gradient(135deg, #38bdf8, #0284c7);
+}
 
 .conv-title-wrap {
   flex: 1;
@@ -2503,5 +3095,252 @@ function formatDateTime(timeStr) {
 
 .gap-sm {
   gap: 8px;
+}
+
+/* ========== 产品问答模式样式 ========== */
+
+/* 对话区模式切换 Tab */
+.mode-tabs {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  background: var(--bg-secondary, #f5f6f8);
+  border-radius: 6px;
+  padding: 3px;
+}
+.mode-tab {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  border: none;
+  background: transparent;
+  padding: 0 10px;
+  height: 24px;
+  border-radius: 4px;
+  font-size: 12px;
+  line-height: 1;
+  color: var(--text-secondary, #555);
+  cursor: pointer;
+  transition: all 0.2s;
+  box-sizing: border-box;
+}
+/* 图标组件渲染为 <svg>，需显式限制尺寸，否则默认大小会撑高按钮 */
+.mode-tab svg {
+  width: 14px !important;
+  height: 14px !important;
+  display: block;
+}
+.mode-tab .el-icon {
+  vertical-align: middle;
+  font-size: 14px;
+}
+.mode-tab.active {
+  background: #fff;
+  color: var(--el-color-primary, #409eff);
+  font-weight: 600;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.08);
+}
+
+/* 问答模式：常驻目录 + 一键全选工具条 */
+.qa-catalog-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 0 12px;
+  border-bottom: 1px solid var(--border-light, #f0f0f0);
+  flex-wrap: wrap;
+}
+.qa-catalog-select {
+  width: 260px;
+}
+.qa-catalog-option {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+.qa-catalog-name {
+  font-size: 13px;
+  max-width: 180px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.qa-catalog-count {
+  font-size: 12px;
+  color: var(--text-muted, #999);
+  flex-shrink: 0;
+}
+.qa-bar-divider {
+  width: 1px;
+  height: 20px;
+  background: var(--border-light, #f0f0f0);
+}
+
+/* 保存目录弹窗提示 */
+.catalog-count-tip {
+  font-size: 13px;
+  color: var(--text-secondary, #666);
+}
+
+/* 问答精确结果卡片 */
+.qa-result-card {
+  margin-top: 12px;
+  border: 1px solid #dcdfe6;
+  border-radius: 8px;
+  padding: 12px 14px;
+  background: #fafcfd;
+}
+.qa-result-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+.qa-result-title {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+.qa-result-single {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  padding: 6px 0;
+}
+.qa-result-value {
+  font-size: 30px;
+  font-weight: 700;
+  color: var(--el-color-primary, #409eff);
+}
+.qa-result-unit {
+  font-size: 13px;
+  color: var(--text-muted, #999);
+}
+.qa-result-table {
+  width: 100%;
+  border-radius: 6px;
+  overflow: hidden;
+}
+
+/* 预测结果 */
+.qa-pred-overview {
+  display: flex;
+  gap: 24px;
+  padding: 4px 0 8px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+.qa-pred-stat {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 90px;
+}
+.qa-pred-label {
+  font-size: 12px;
+  color: var(--text-muted, #999);
+}
+.qa-pred-num {
+  font-size: 24px;
+  font-weight: 700;
+  color: var(--el-color-primary, #409eff);
+}
+.qa-pred-bars {
+  flex: 1;
+  min-width: 200px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.qa-pred-bar-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+}
+.qa-pred-bar-label {
+  min-width: 60px;
+  color: var(--text-secondary, #666);
+  text-align: right;
+}
+.qa-pred-bar-track {
+  flex: 1;
+  height: 8px;
+  background: var(--bg-secondary, #f0f2f5);
+  border-radius: 4px;
+  overflow: hidden;
+}
+.qa-pred-bar-fill {
+  height: 100%;
+  background: var(--el-color-primary, #409eff);
+  border-radius: 4px;
+  transition: width 0.3s;
+}
+.qa-pred-bar-val {
+  min-width: 30px;
+  color: var(--text-primary);
+}
+.qa-pred-samples-label {
+  font-size: 12px;
+  color: var(--text-muted, #999);
+  margin: 6px 0 4px;
+}
+/* 预测来源标注 */
+.qa-pred-source {
+  font-size: 12px;
+  color: var(--text-muted, #999);
+  padding: 2px 0 4px;
+}
+/* 时间外推结果 */
+.qa-pred-forecast {
+  margin: 4px 0 8px;
+  padding: 10px 12px;
+  background: var(--bg-secondary, #f5f7fa);
+  border: 1px dashed var(--el-border-color, #dcdfe6);
+  border-radius: 6px;
+}
+.qa-pred-forecast-title {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-primary);
+  margin-bottom: 8px;
+}
+.qa-pred-forecast-badge {
+  font-size: 11px;
+  font-weight: 600;
+  color: #fff;
+  background: var(--el-color-warning, #e6a23c);
+  border-radius: 3px;
+  padding: 1px 6px;
+}
+.qa-pred-forecast-grid {
+  display: flex;
+  gap: 24px;
+  flex-wrap: wrap;
+}
+.qa-pred-forecast-item {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.qa-pred-forecast-label {
+  font-size: 12px;
+  color: var(--text-muted, #999);
+}
+.qa-pred-forecast-value {
+  font-size: 18px;
+  font-weight: 700;
+  color: var(--el-color-primary, #409eff);
+}
+.qa-pred-forecast-next {
+  color: var(--el-color-success, #67c23a);
 }
 </style>

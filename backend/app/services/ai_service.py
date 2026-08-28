@@ -4,8 +4,10 @@ from openai import OpenAI
 from datetime import datetime, timedelta
 from app.config import settings
 from app.services.data_service import DataService
+from app.services.ai_client import LLMClientProvider
 from app.models import AIConfig, AIConversation, AIUsageLog, Dataset, AIMessage, AIConversationContext, TaskRecord, shanghai_now
 from app.services.ai_context import build_context_bundle, build_system_prompt, compress_conversation
+from sqlalchemy import or_
 from sqlalchemy.orm import Session
 from typing import Optional, Dict, Any, List
 
@@ -35,67 +37,22 @@ class AIService:
     def __init__(self, db: Session):
         self.db = db
         self.data_service = DataService(db)
-        self._clients = None
-        self._default_client = None
+        # LLM 客户端/模型/配置统一交给共享 Provider 管理，与问答服务共用一套逻辑
+        self._client_provider = LLMClientProvider(db)
     
     def _get_clients(self):
-        """懒加载AI客户端，优先使用系统API Key"""
-        if self._clients is None:
-            self._clients = {}
-            self._default_client = None
-            
-            if settings.OPENAI_API_KEY:
-                try:
-                    kwargs = {"api_key": settings.OPENAI_API_KEY}
-                    if settings.OPENAI_API_BASE:
-                        kwargs["base_url"] = settings.OPENAI_API_BASE
-                    client = OpenAI(**kwargs)
-                    self._clients["openai"] = client
-                    self._default_client = "openai"
-                except Exception:
-                    pass
-            else:
-                db_config = self._get_active_config()
-                if db_config:
-                    try:
-                        client = self._create_client_from_config(db_config)
-                        if client:
-                            self._clients[db_config.provider] = client
-                            self._default_client = db_config.provider
-                    except Exception:
-                        pass
-        
-        return self._clients
-    
+        """懒加载AI客户端（委托共享 Provider）"""
+        return self._client_provider.get_clients()
+
     def _create_client_from_config(self, config: AIConfig) -> Optional[OpenAI]:
-        """根据配置创建AI客户端"""
-        if not config or not config.api_key:
-            return None
-        
-        base_url = config.base_url
-        if not base_url:
-            if config.provider == "deepseek":
-                base_url = "https://api.deepseek.com"
-            elif config.provider == "openai":
-                base_url = None
-        
-        try:
-            if base_url:
-                return OpenAI(api_key=config.api_key, base_url=base_url)
-            else:
-                return OpenAI(api_key=config.api_key)
-        except Exception:
-            return None
-    
+        """根据配置创建AI客户端（委托共享 Provider）"""
+        return self._client_provider._create_client_from_config(config)
+
     # ========== 配置管理方法 ==========
 
     def _get_active_config(self) -> Optional[AIConfig]:
-        """获取当前激活的AI配置"""
-        try:
-            config = self.db.query(AIConfig).filter(AIConfig.is_active == True).first()
-            return config
-        except Exception:
-            return None
+        """获取当前激活的AI配置（委托共享 Provider）"""
+        return self._client_provider._get_active_config()
 
     def get_config(self) -> Dict[str, Any]:
         """获取AI配置状态，优先使用系统API Key"""
@@ -137,9 +94,8 @@ class AIService:
             self.db.add(new_config)
             self.db.commit()
             
-            self._clients = None
-            self._default_client = None
-            
+            self._client_provider.reset()
+
             return {"success": True, "message": "配置保存成功"}
         except Exception as e:
             self.db.rollback()
@@ -183,7 +139,7 @@ class AIService:
         initial_message 仅用于生成标题，不写入 conversation JSON，
         避免与后续 _save_message 写入的 user 消息产生重复。
         """
-        expires_at = datetime.utcnow() + timedelta(minutes=30)
+        expires_at = datetime.utcnow() + timedelta(minutes=settings.AI_CONVERSATION_TTL_MINUTES)
 
         module_names = {
             "data_cleaning": "数据清洗",
@@ -191,10 +147,16 @@ class AIService:
             "feature_engineering": "特征工程",
             "machine_learning": "机器学习",
             "comprehensive": "全方位分析",
-            "general_chat": "智能对话"
+            "general_chat": "分析对话",
+            "ai_qa": "产品问答"
         }
         module_name = module_names.get(module_type, module_type)
-        title = f"{module_name}分析 · {shanghai_now().strftime('%Y-%m-%d %H:%M')}"
+        # 产品问答/分析对话：标题直接使用与模式按钮一致的名称，不带模块参数与时间戳，
+        # 保证历史会话命名与底部按钮"分析对话/产品问答"一致。
+        if module_type in ("ai_qa", "general_chat"):
+            title = module_name
+        else:
+            title = f"{module_name}分析 · {shanghai_now().strftime('%Y-%m-%d %H:%M')}"
 
         new_conv = AIConversation(
             user_id=user_id,
@@ -202,7 +164,7 @@ class AIService:
             module_type=module_type,
             title=title,
             conversation=[],
-            follow_up_remaining=10,
+            follow_up_remaining=settings.AI_CONVERSATION_FOLLOWUP_MAX,
             expires_at=expires_at
         )
         
@@ -235,7 +197,7 @@ class AIService:
         if follow_up_remaining is not None:
             conv.follow_up_remaining = follow_up_remaining
 
-        conv.expires_at = datetime.utcnow() + timedelta(minutes=30)
+        conv.expires_at = datetime.utcnow() + timedelta(minutes=settings.AI_CONVERSATION_TTL_MINUTES)
         conv.updated_at = datetime.utcnow()
 
         self.db.commit()
@@ -350,7 +312,7 @@ class AIService:
             包含回答、会话ID、使用情况、needs_context 的字典
         """
         # 检查AI配置
-        client = self._get_clients().get(self._default_client)
+        client = self._client_provider.get_default_client()
         if not client:
             return {"error": "请先配置API Key才能使用AI分析功能"}
 
@@ -364,9 +326,9 @@ class AIService:
                 return {"error": "会话不存在"}
             # 会话过期检查：30 分钟无活动后禁止继续对话（修复）
             if self.is_conversation_expired(conv):
-                return {"error": "会话已过期（30 分钟无活动），请开始新话题"}
+                return {"error": "会话已过期（长时间无活动），请开始新话题"}
             # 追问次数检查：耗尽后要求开启新会话（修复）
-            if getattr(conv, "follow_up_remaining", 10) <= 0:
+            if getattr(conv, "follow_up_remaining", settings.AI_CONVERSATION_FOLLOWUP_MAX) <= 0:
                 return {"error": "本话题追问次数已用完，请开启新会话继续提问"}
         else:
             # 创建新会话：标题取问题前30字符
@@ -457,9 +419,9 @@ class AIService:
             updated_messages.append({"role": "assistant", "content": answer})
             self.update_conversation(conv.id, updated_messages)
 
-            # 追问次数递减并刷新过期时间（30 分钟无活动会话自动过期）（修复）
-            conv.follow_up_remaining = max(0, getattr(conv, "follow_up_remaining", 10) - 1)
-            conv.expires_at = datetime.utcnow() + timedelta(minutes=30)
+            # 追问次数递减并刷新过期时间（无活动会话自动过期）（修复）
+            conv.follow_up_remaining = max(0, getattr(conv, "follow_up_remaining", settings.AI_CONVERSATION_FOLLOWUP_MAX) - 1)
+            conv.expires_at = datetime.utcnow() + timedelta(minutes=settings.AI_CONVERSATION_TTL_MINUTES)
             self.db.commit()
 
             # 如果压缩产生了新摘要，更新到数据库
@@ -468,9 +430,10 @@ class AIService:
                 self.db.commit()
 
             # 保存上下文项快照到会话（便于恢复）
-            # last_context_items 是 JSON 列，直接赋值 Python 对象由 SQLAlchemy 序列化
+            # last_context_items 是 JSON 列，直接赋值 Python 对象由 SQLAlchemy 序列化；
+            # 前端只传 type/ref_id，这里补全 label 等展示字段，避免历史会话恢复时空缺
             if context_items:
-                conv.last_context_items = context_items
+                conv.last_context_items = self._build_context_snapshot(context_items)
                 self.db.commit()
 
             # 记录使用日志
@@ -492,6 +455,90 @@ class AIService:
 
         except Exception as e:
             return {"error": f"AI回复生成失败: {str(e)}"}
+
+    def _build_context_snapshot(self, context_items: List[Dict]):
+        """根据 type/ref_id 补全上下文快照（label/artifact_type 等前端展示字段）
+
+        前端请求只传 type 与 ref_id，为让历史会话恢复正常显示，这里从数据库
+        反查数据集、操作记录的展示信息，生成完整快照供详细接口返回。
+
+        Args:
+            context_items: [{type, ref_id}, ...]
+
+        Returns:
+            补全后的快照列表；无法匹配的记录被跳过
+        """
+        snapshots = []
+        for item in context_items:
+            ctype = item.get("type")
+            ref_id = item.get("ref_id")
+            if not ref_id:
+                continue
+            if ctype == "dataset":
+                ds = self.db.query(Dataset).filter(Dataset.id == ref_id).first()
+                if not ds:
+                    continue
+                snapshots.append({
+                    "type": "dataset",
+                    "ref_id": ref_id,
+                    "label": f"{ds.name} (ID:{ds.id})",
+                    "artifact_type": ds.artifact_type or "",
+                    "artifact_label": ds.artifact_type or ""
+                })
+            else:  # operation
+                task = self.db.query(TaskRecord).filter(TaskRecord.id == ref_id).first()
+                if not task:
+                    continue
+                op_type = task.task_type or "unknown"
+                snapshots.append({
+                    "type": "operation",
+                    "ref_id": ref_id,
+                    "label": f"任务#{task.id}({op_type})",
+                    "artifact_type": op_type,
+                    "artifact_label": op_type
+                })
+        return snapshots
+
+    def _enrich_context_status(self, items: List[Dict]):
+        """对历史会话的上下文快照做实时状态校验，标注已回收/已删除的项
+
+        快照保存后数据集可能被回收站删除、彻底清空或状态变为损坏，任务记录
+        可能被物理清理。这里在返回详情时逐个回查当前状态，附加 status 与
+        status_label 供前端提示，避免用户误以为已删除的数据仍可用于分析。
+
+        Args:
+            items: last_context_items 快照列表（可能为 None）
+
+        Returns:
+            标注状态后的快照列表
+        """
+        STATUS_LABELS = {
+            "deleted": "已移至回收站",
+            "purged": "已彻底删除",
+            "corrupted": "文件已损坏"
+        }
+        enriched = []
+        for item in items or []:
+            it = dict(item)
+            ctype = it.get("type")
+            ref_id = it.get("ref_id")
+            if ctype == "dataset":
+                ds = self.db.query(Dataset).filter(Dataset.id == ref_id).first()
+                if not ds:
+                    it["status"] = "deleted"
+                    it["status_label"] = "已删除"
+                elif (ds.status or "active") != "active":
+                    it["status"] = ds.status
+                    it["status_label"] = STATUS_LABELS.get(ds.status, "已删除")
+                else:
+                    it.setdefault("status", "active")
+            elif ctype == "operation":
+                task = self.db.query(TaskRecord).filter(TaskRecord.id == ref_id).first()
+                if not task:
+                    it["status"] = "deleted"
+                    it["status_label"] = "任务记录已不存在"
+            enriched.append(it)
+        return enriched
 
     def _save_context_items(self, conversation_id: int, context_items: List[Dict]):
         """将上下文项持久化到 ai_conversation_contexts 关联表"""
@@ -895,6 +942,18 @@ class AIService:
                         ).first()
                         if conn:
                             remote_connection_name = conn.name
+            # 数据集展示信息：
+            # 远程任务的数据源在远程表，数据集名用"连接名/表名"标识，且不依赖本地产物状态（避免误报回收站）
+            if is_remote_flag:
+                dataset_name_display = remote_table_name or f"远程表（连接:{remote_connection_name or '未知'}）"
+                dataset_status_display = None
+            elif task.dataset_id:
+                dataset_name_display = ds_info.get("name", "未知数据集")
+                dataset_status_display = ds_info.get("status", "deleted")
+            else:
+                dataset_name_display = "无关联数据集"
+                dataset_status_display = None
+
             task_list.append({
                 "id": task.id,
                 "task_type": task_type,
@@ -907,8 +966,8 @@ class AIService:
                 "remote_connection_name": remote_connection_name,
                 "remote_table_name": remote_table_name,
                 "dataset_id": task.dataset_id,
-                "dataset_name": ds_info.get("name", "未知数据集") if task.dataset_id else "无关联数据集",
-                "dataset_status": ds_info.get("status", "deleted") if task.dataset_id else None,
+                "dataset_name": dataset_name_display,
+                "dataset_status": dataset_status_display,
                 "status": task.status,
                 "params": task.params,
                 "result_summary": task.result_summary,
@@ -925,6 +984,81 @@ class AIService:
                 "total": total_tasks,
                 "total_pages": (total_tasks + task_page_size - 1) // task_page_size
             }
+        }
+
+    def get_bloodline_operations(self, dataset_id: int, user_id: int, limit: int = 10) -> Dict[str, Any]:
+        """按数据产物血缘链返回最近操作记录，每条标注其所属产物
+
+        血缘定义：以产物（或数据）的 root_dataset_id 为根，收集血缘内所有数据集，
+        再取这些数据集关联的任务记录（按时间倒序）。用于前端"选产物自动带出血缘操作"，
+        让上下文中产物与其清洗/分析/挖掘/保存等操作天然配对，避免手动勾错/漏勾。
+
+        Args:
+            dataset_id: 数据产物（Dataset）的 ID
+            user_id: 当前用户 ID
+            limit: 返回最近任务条数（默认 10，控制注入量）
+
+        Returns:
+            含血缘根信息 + 操作列表（每条含所属产物标 identity）
+        """
+        from app.utils.common import TASK_TYPE_LABEL_MAP
+        from app.utils.task_labels import OPERATION_LABELS
+
+        ds = self.db.query(Dataset).filter(
+            Dataset.id == dataset_id,
+            Dataset.user_id == user_id,
+            Dataset.status == "active"
+        ).first()
+        if not ds:
+            return {"error": "数据集不存在或不可用"}
+
+        # 血缘根：若产物设置了 root_dataset_id 则用根，否则用自身 ID
+        root = getattr(ds, "root_dataset_id", None) or ds.id
+        # 血缘内所有数据集（根自身 + 以该根为血缘根的所有产物）
+        lineage = self.db.query(Dataset).filter(
+            Dataset.user_id == user_id,
+            or_(Dataset.id == root, Dataset.root_dataset_id == root)
+        ).all()
+        lineage_ids = {d.id for d in lineage}
+        lineage_names = {d.id: d.name for d in lineage}
+
+        # AI 分析用不上的任务大类，与操作历史/上下文选项口径保持一致
+        EXCLUDED_TASK_TYPES = {"upload", "dataset", "ai"}
+        ops = self.db.query(TaskRecord).filter(
+            TaskRecord.user_id == user_id,
+            ~TaskRecord.task_type.in_(EXCLUDED_TASK_TYPES),
+            TaskRecord.status.in_(["success", "failed"]),
+            TaskRecord.dataset_id.in_(lineage_ids)
+        ).order_by(TaskRecord.created_at.desc()).limit(limit).all()
+
+        operation_list = []
+        for t in ops:
+            t_type = t.task_type or "unknown"
+            params = t.params or {}
+            if not isinstance(params, dict):
+                params = {}
+            operation = params.get("operation", "")
+            operation_label = OPERATION_LABELS.get(operation, operation) if operation else ""
+            owner_id = t.dataset_id
+            owner_name = lineage_names.get(owner_id) if owner_id else None
+            operation_list.append({
+                "id": t.id,
+                "task_type": t_type,
+                "task_type_label": TASK_TYPE_LABEL_MAP.get(t_type, t_type),
+                "operation": operation,
+                "operation_label": operation_label,
+                "status": t.status,
+                "dataset_id": owner_id,
+                # 标注该操作所属的产物（血缘内数据集名 + ID），便于用户区分同名产物
+                "belongs_to": f"{owner_name} (ID:{owner_id})" if owner_id and owner_name else (f"ID:{owner_id}" if owner_id else ""),
+                "created_at": t.created_at.isoformat() if t.created_at else None
+            })
+
+        return {
+            "dataset_id": dataset_id,
+            "dataset_name": ds.name,
+            "root_dataset_id": root,
+            "operations": operation_list
         }
 
     def preview_context_item(self, item_type: str, ref_id: int, user_id: int) -> Dict[str, Any]:
@@ -1025,11 +1159,5 @@ class AIService:
         }
 
     def _get_model_name(self) -> str:
-        """获取当前使用的模型名称"""
-        if settings.OPENAI_API_KEY and settings.OPENAI_MODEL:
-            return settings.OPENAI_MODEL
-        config = self._get_active_config()
-        if config and config.model:
-            return config.model
-        # 默认模型名：DeepSeek 官方模型为 deepseek-chat（非 deepseek-v4-flash）
-        return "gpt-3.5-turbo" if self._default_client == "openai" else "deepseek-chat"
+        """获取当前使用的模型名称（委托共享 Provider）"""
+        return self._client_provider.get_model_name()
